@@ -35,12 +35,22 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
   - **Paper Saver Position**: Print at **Top**, **Center**, or **Bottom Half of A4** (reuse half-printed A4 sheets!)
   - Optional security stamp line (e.g. `FOR BANK VERIFICATION ONLY`), rounded card corners, 1-click A4 Print & 300-DPI PDF/JPG download.
 
-### 3. 📄 Visual PDF Studio (Edit, Whiteout, Merge & Split)
+### 3. 📄 Visual PDF Studio + 🤖 AI PDF Assistant (Edit, Replace, Merge & Split)
 - **Visual PDF Page Editor**:
   - **Whiteout / Eraser Box**: Cover old dates, names, or form text cleanly on any PDF.
-  - **Add Urdu Nastaliq or English Text**: Place connected Nastaliq Urdu or English text anywhere on existing PDF pages.
-  - **Place Signatures, Stamps, or Photos**: Drag & resize onto forms.
-  - **Rotate / Delete Pages** & optional **Page Numbering**.
+  - **Add Urdu Nastaliq or English Text**: Place real Nastaliq Urdu or English text anywhere on existing PDF pages (rasterised at ≈216 DPI so ligatures stay perfect in print).
+  - **Place Signatures, Stamps, or Photos**: Drag & scale onto forms.
+  - **Drag & Drop** any PDF straight onto the page, **Rotate / Delete / Re-order Pages**, optional **Page Numbering**.
+  - **Undo / Redo** (`Ctrl+Z` / `Ctrl+Y`), `Delete` to remove the selected edit, `Esc` to cancel a tool.
+  - **True WYSIWYG** — the on-screen preview is produced by the exact same rasteriser that writes the final PDF, so what you see is what prints. Rotated pages are flattened at 260 DPI so they print correctly too.
+- **AI PDF Assistant (Groq)** — the shop's own "type an order" editor:
+  - Upload the customer PDF and simply write, in **English / Roman Urdu / Urdu**:
+    - `Replace the name Ahmed with Bilal` → the AI finds that exact text, white-outs it and types the new name in the same place, same size.
+    - `Remove the phone number` → white-outs just that line.
+    - `Add "For Bank Verification Only" at the bottom` → places new text exactly where asked.
+  - The assistant reads the PDF's real text layer (line positions + font sizes), shows a **review list of proposed changes**, and only touches the document when you press **Apply** (fully undoable).
+  - Also answers questions ("what does this document say?") and warns honestly when text cannot be found or when the PDF is a scan with no text layer.
+  - Needs a free **Groq API key** (top bar → *Add Groq Key*); the key stays in the browser.
 - **Merge Multiple PDFs** & **Split / Extract Specific Page Ranges**.
 
 ### 3. 🖼️ Image → PDF & WhatsApp Document Cleaner (`Toner Saver`)

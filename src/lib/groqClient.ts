@@ -77,7 +77,13 @@ export async function testGroqConnection(apiKeyOverride?: string): Promise<{
 
 async function callGroqChat(
   messages: any[],
-  options: { model?: string; temperature?: number; maxTokens?: number; fallbackModel?: string } = {}
+  options: {
+    model?: string;
+    temperature?: number;
+    maxTokens?: number;
+    fallbackModel?: string;
+    jsonMode?: boolean;
+  } = {}
 ): Promise<string> {
   const settings = getGroqSettings();
   const key = settings.apiKey.trim();
@@ -97,29 +103,37 @@ async function callGroqChat(
   let lastError = 'Groq request failed';
 
   for (const model of tryModels) {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
+    for (const useJsonMode of options.jsonMode ? [true, false] : [false]) {
+      const body: Record<string, unknown> = {
         model,
         messages,
         temperature: options.temperature ?? 0.3,
         max_tokens: options.maxTokens ?? 1500,
-      }),
-    });
+      };
+      if (useJsonMode) body.response_format = { type: 'json_object' };
 
-    if (res.ok) {
-      const data = await res.json();
-      return data?.choices?.[0]?.message?.content?.trim() || '';
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return data?.choices?.[0]?.message?.content?.trim() || '';
+      }
+
+      const errJson = await res.json().catch(() => ({}));
+      lastError = errJson?.error?.message || `Groq HTTP ${res.status}`;
+      // Invalid key -> stop immediately
+      if (res.status === 401) throw new Error(lastError);
+      // JSON mode rejected by this model -> retry once without it
+      if (useJsonMode && (res.status === 400 || res.status === 422)) continue;
+      break;
     }
-
-    const errJson = await res.json().catch(() => ({}));
-    lastError = errJson?.error?.message || `Groq HTTP ${res.status}`;
-    // If invalid key or rate limit, don't retry other models needlessly on 401
-    if (res.status === 401) break;
   }
 
   throw new Error(lastError);
@@ -291,4 +305,35 @@ export async function extractDocumentOcrWithGroq(imageDataUrl: string): Promise<
   }
 
   throw new Error(lastErr);
+}
+
+/**
+ * Generic JSON-mode completion used by the AI PDF Assistant.
+ * Returns the raw model text (expected to be a JSON object).
+ */
+export async function groqJsonCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+  opts: { temperature?: number; maxTokens?: number } = {}
+): Promise<string> {
+  const settings = getGroqSettings();
+  if (!settings.apiKey.trim()) {
+    throw new Error(
+      'Please add your Groq API Key first (top bar → "Add Groq Key") to use the AI PDF Assistant.'
+    );
+  }
+
+  return callGroqChat(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    {
+      model: settings.smartModel,
+      fallbackModel: settings.fastModel,
+      temperature: opts.temperature ?? 0.15,
+      maxTokens: opts.maxTokens ?? 1800,
+      jsonMode: true,
+    }
+  );
 }

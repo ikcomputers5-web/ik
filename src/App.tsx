@@ -104,8 +104,9 @@ export const App: React.FC = () => {
     },
     {
       key: 'pdf_studio',
-      labelEn: 'PDF Edit, Merge & Split',
-      labelUr: 'پی ڈی ایف ایڈیٹر',
+      labelEn: 'PDF Editor + AI Assistant',
+      labelUr: 'پی ڈی ایف ایڈیٹر و اے آئی',
+      badge: 'AI',
       icon: FileText,
     },
     {
@@ -284,7 +285,9 @@ export const App: React.FC = () => {
 
           {activeModule === 'id_card_maker' && <IdCardPageMaker />}
 
-          {activeModule === 'pdf_studio' && <PdfStudio />}
+          {activeModule === 'pdf_studio' && (
+            <PdfStudio onOpenGroqModal={() => setGroqModalOpen(true)} />
+          )}
 
           {activeModule === 'img_to_pdf' && <ImageToPdfStudio />}
 
