@@ -1,0 +1,42 @@
+{
+  "name": "ik-computers-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "IK Computers — All-in-One Urdu Composing, PDF Editor, Document Scanner, AI Background Remover & Print Shop Suite",
+  "scripts": {
+    "dev": "node server/index.js",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.js"
+  },
+  "dependencies": {
+    "@fontsource/gulzar": "^5.3.0",
+    "@fontsource/noto-naskh-arabic": "^5.3.0",
+    "@fontsource/noto-nastaliq-urdu": "^5.3.0",
+    "@imgly/background-removal": "1.4.5",
+    "@mediapipe/selfie_segmentation": "^0.1.1675465747",
+    "express": "^4.21.2",
+    "jspdf": "^2.5.2",
+    "lucide-react": "^0.475.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
+    "peerjs": "^1.5.5",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
