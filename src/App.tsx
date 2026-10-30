@@ -14,6 +14,7 @@ import {
   X,
   CheckCircle2,
 } from 'lucide-react';
+import { LiveComposing } from './components/LiveComposing';
 import { UrduComposer } from './components/UrduComposer';
 import { IdCardPageMaker } from './components/IdCardPageMaker';
 import { PdfStudio } from './components/PdfStudio';
@@ -27,6 +28,7 @@ import { GroqSettingsModal } from './components/GroqSettingsModal';
 import { hasGroqKey } from './lib/groqClient';
 
 type ModuleKey =
+  | 'live_composing'
   | 'urdu_composer'
   | 'id_card_maker'
   | 'pdf_studio'
@@ -43,7 +45,7 @@ export const App: React.FC = () => {
     return params.get('mobile');
   });
 
-  const [activeModule, setActiveModule] = useState<ModuleKey>('urdu_composer');
+  const [activeModule, setActiveModule] = useState<ModuleKey>(new URLSearchParams(window.location.search).has('live') ? 'live_composing' : 'urdu_composer');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [groqModalOpen, setGroqModalOpen] = useState<boolean>(false);
   const [groqConfigured, setGroqConfigured] = useState<boolean>(() => hasGroqKey());
@@ -60,6 +62,9 @@ export const App: React.FC = () => {
     window.addEventListener('ik-groq-updated', onUpdate);
     return () => window.removeEventListener('ik-groq-updated', onUpdate);
   }, []);
+
+  const liveMobileRoom = new URLSearchParams(window.location.search).get('mobilelive');
+  if (liveMobileRoom) return <LiveComposing mobile initialRoom={liveMobileRoom} />;
 
   if (mobileRoomParam) {
     return (
@@ -82,6 +87,7 @@ export const App: React.FC = () => {
     badge?: string;
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
+    { key: 'live_composing', labelEn: 'Live Mobile Composing', labelUr: 'موبائل سے براہ راست لکھیں', badge: 'Live', icon: Smartphone },
     {
       key: 'urdu_composer',
       labelEn: 'Urdu & Doc Composer',
@@ -273,6 +279,8 @@ export const App: React.FC = () => {
               externalInsertHtml={composerIncomingHtml}
             />
           )}
+
+          {activeModule === 'live_composing' && <LiveComposing />}
 
           {activeModule === 'id_card_maker' && <IdCardPageMaker />}
 

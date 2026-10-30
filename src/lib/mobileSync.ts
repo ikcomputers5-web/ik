@@ -8,7 +8,8 @@ import Peer, { DataConnection } from 'peerjs';
 
 export interface SyncMessage {
   msgId?: string;
-  type: 'room_status' | 'insert_text' | 'live_composing' | 'command' | 'context_sync' | 'hello';
+  revision?: number;
+  type: 'live_document' | 'room_status' | 'insert_text' | 'live_composing' | 'command' | 'context_sync' | 'hello';
   room?: string;
   text?: string;
   action?: 'backspace' | 'enter' | 'undo' | 'space';
@@ -44,6 +45,7 @@ export class HybridMobileSync {
   private destroyed = false;
   private wsConnectedPeers = 0;
   private bcConnected = false;
+  private wsRetry: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: {
@@ -208,7 +210,6 @@ export class HybridMobileSync {
       return;
     }
 
-    let wsRetry: ReturnType<typeof setTimeout>;
     const connectWs = () => {
       if (this.destroyed) return;
       try {
@@ -239,7 +240,7 @@ export class HybridMobileSync {
           this.wsConnectedPeers = 0;
           this.emitStatus();
           if (!this.destroyed) {
-            wsRetry = setTimeout(connectWs, 3000);
+            this.wsRetry = setTimeout(connectWs, 3000);
           }
         };
 
@@ -291,6 +292,7 @@ export class HybridMobileSync {
 
   public destroy() {
     this.destroyed = true;
+    if (this.wsRetry) clearTimeout(this.wsRetry);
     if (this.reconnectTimer) clearInterval(this.reconnectTimer);
     for (const c of this.peerConns) {
       try {
