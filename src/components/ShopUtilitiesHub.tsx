@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Sparkles,
   Minimize2,
@@ -161,6 +161,92 @@ export const ShopUtilitiesHub: React.FC<ShopUtilitiesHubProps> = ({
   const saveRatesToStorage = (next: RateItem[]) => {
     setItems(next);
     localStorage.setItem('ik_pos_rates_v1', JSON.stringify(next));
+  };
+
+  // --- Receipt PDF Export (tight page = receipt only, no A4 white sheet) ---
+  const receiptRef = useRef<HTMLDivElement | null>(null);
+  const [pdfBusy, setPdfBusy] = useState<boolean>(false);
+  const [pdfErr, setPdfErr] = useState<string>('');
+
+  const receiptSizeMm = () => {
+    const el = receiptRef.current;
+    const pxW = el?.offsetWidth || 384;
+    const pxH = el?.offsetHeight || 400;
+    return { wMm: Math.max(40, (pxW * 25.4) / 96), hMm: Math.max(40, (pxH * 25.4) / 96) };
+  };
+
+  const handleDownloadReceiptPdf = async () => {
+    if (pdfBusy) return;
+    const el = receiptRef.current;
+    if (!el) return;
+    setPdfBusy(true);
+    setPdfErr('');
+    try {
+      const [{ jsPDF }, html2canvasModule] = await Promise.all([
+        import('jspdf'),
+        import('html2canvas'),
+      ]);
+      const html2canvas = html2canvasModule.default;
+      const canvas = await html2canvas(el, {
+        scale: 3,
+        backgroundColor: '#ffffff',
+        useCORS: true,
+        logging: false,
+        scrollX: 0,
+        scrollY: 0,
+        windowWidth: el.scrollWidth,
+        windowHeight: el.scrollHeight,
+      });
+
+      const { wMm, hMm } = receiptSizeMm();
+      const pdf = new jsPDF({
+        orientation: wMm > hMm ? 'landscape' : 'portrait',
+        unit: 'mm',
+        format: [wMm, hMm],
+        compress: true,
+      });
+      pdf.addImage(
+        canvas.toDataURL('image/png'),
+        'PNG',
+        0,
+        0,
+        wMm,
+        hMm,
+        undefined,
+        'FAST'
+      );
+
+      const safeName =
+        (customerName || 'Customer').replace(/[^\w\-]+/g, '_').slice(0, 24) || 'Customer';
+      const stamp = new Date().toISOString().slice(0, 10);
+      pdf.save(`IK-Computers-Receipt-${stamp}-${safeName}.pdf`);
+    } catch (e: any) {
+      setPdfErr(e?.message || 'Could not create PDF');
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  // Print at the exact receipt size so "Save as PDF" from the browser dialog
+  // also produces just the receipt instead of a full blank page.
+  const handlePrintReceipt = () => {
+    const el = receiptRef.current;
+    if (!el) return;
+    const { wMm, hMm } = receiptSizeMm();
+    const style = document.createElement('style');
+    style.setAttribute('data-ik-print-size', 'true');
+    style.textContent = `@media print {
+      @page { size: ${wMm.toFixed(1)}mm ${hMm.toFixed(1)}mm; margin: 0; }
+      #ik-print-area { width: ${wMm.toFixed(1)}mm !important; max-width: none !important; }
+    }`;
+    document.head.appendChild(style);
+    const cleanup = () => {
+      style.remove();
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    window.print();
+    setTimeout(cleanup, 2000);
   };
 
   return (
@@ -536,6 +622,7 @@ export const ShopUtilitiesHub: React.FC<ShopUtilitiesHubProps> = ({
           {/* Printable Cash Receipt Preview */}
           <div className="lg:col-span-5 flex flex-col items-center">
             <div
+              ref={receiptRef}
               id="ik-print-area"
               className="bg-white text-black w-full max-w-sm rounded-xl shadow-2xl p-6 font-mono text-xs"
             >
@@ -591,12 +678,28 @@ export const ShopUtilitiesHub: React.FC<ShopUtilitiesHubProps> = ({
               </p>
             </div>
 
-            <button
-              onClick={() => window.print()}
-              className="mt-4 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg no-print"
-            >
-              <Printer className="w-4 h-4" /> Print Cash Receipt
-            </button>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2 no-print">
+              <button
+                onClick={handleDownloadReceiptPdf}
+                disabled={pdfBusy}
+                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-bold flex items-center gap-2 shadow-lg"
+              >
+                <Download className="w-4 h-4" />
+                {pdfBusy ? 'Creating PDF…' : 'Download Receipt PDF'}
+              </button>
+              <button
+                onClick={handlePrintReceipt}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-2"
+              >
+                <Printer className="w-4 h-4" /> Print
+              </button>
+            </div>
+            {pdfErr && (
+              <p className="mt-2 text-[11px] text-rose-400 no-print">{pdfErr}</p>
+            )}
+            <p className="mt-2 text-[11px] text-slate-500 text-center no-print">
+              PDF page is cropped to the receipt only — no blank sheet around it.
+            </p>
           </div>
         </div>
       )}
