@@ -25,6 +25,11 @@ export interface PdfTextLine {
   fontSize: number; // points
   rtl: boolean;
   parts: TextPart[];
+  /**
+   * Where the line came from. Real PDF text layer by default; `'ocr'` when the
+   * page is a scan and the box was estimated by Groq vision.
+   */
+  source?: 'text' | 'ocr';
 }
 
 export interface PdfPageText {

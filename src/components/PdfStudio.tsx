@@ -6,8 +6,20 @@ import {
   normalizeRotation,
   type PDFDocumentProxy,
 } from '../lib/pdfjs';
-import { extractPdfText, type PdfTextIndex, type PdfTextLine } from '../lib/pdfText';
-import { buildLineReplaceOverlays, hitTestLine } from '../lib/pdfTextEdit';
+import {
+  extractPdfText,
+  looksRtl,
+  type PdfPageText,
+  type PdfTextIndex,
+  type PdfTextLine,
+} from '../lib/pdfText';
+import {
+  buildFreeTextOverlays,
+  buildLineReplaceOverlays,
+  hitTestLine,
+  mergeOcrIntoLines,
+  ocrBoxesToLines,
+} from '../lib/pdfTextEdit';
 import {
   ensureOverlayFonts,
   fitTextOverlay,
@@ -18,7 +30,7 @@ import {
   type PdfOverlay,
 } from '../lib/pdfOverlay';
 import { buildEditedPdf, pageViewSize } from '../lib/pdfExport';
-import { extractDocumentOcrWithGroq, hasGroqKey } from '../lib/groqClient';
+import { hasGroqKey, isGroqApiError, ocrPageWithBoxes } from '../lib/groqClient';
 import type { AiDraft } from '../lib/pdfAiEdit';
 import { PdfAiAssistant } from './PdfAiAssistant';
 import { PdfTextEditor } from './PdfTextEditor';
@@ -50,7 +62,21 @@ import {
 } from 'lucide-react';
 
 type PdfTab = 'editor' | 'merge' | 'split';
-type EditorTool = 'move' | 'whiteout' | 'text_urdu' | 'text_en' | 'text_edit';
+type EditorTool = 'move' | 'whiteout' | 'text_urdu' | 'text_en' | 'text_edit' | 'cover_retype';
+
+/**
+ * The inline card above the stage has two modes:
+ *  • 'line' — bound to a real/OCR PdfTextLine (click-to-edit)
+ *  • 'free' — "Cover & Retype": a whiteout box + free text, no text layer needed
+ */
+type InlineEdit =
+  | { kind: 'line'; page: number; line: PdfTextLine; value: string }
+  | { kind: 'free'; page: number; overlayId: string; value: string };
+
+type StatusAction = { label: string; onClick: () => void };
+
+const COVER_RETYPE_W = 0.26;
+const COVER_RETYPE_H = 0.05;
 
 interface PageMeta {
   id: string;
@@ -112,7 +138,11 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
   const [previewBusy, setPreviewBusy] = useState<boolean>(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
-  const [status, setStatus] = useState<{ kind: 'ok' | 'error' | 'info'; text: string } | null>(null);
+  const [status, setStatus] = useState<{
+    kind: 'ok' | 'error' | 'info';
+    text: string;
+    actions?: StatusAction[];
+  } | null>(null);
 
   // ---------- Editing state ----------
   const [tool, setTool] = useState<EditorTool>('move');
@@ -132,11 +162,14 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
   const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(null);
   const [extractNonce, setExtractNonce] = useState<number>(0);
   const [textPanelOpen, setTextPanelOpen] = useState<boolean>(false);
-  const [editingLine, setEditingLine] = useState<{ page: number; line: PdfTextLine; value: string } | null>(
-    null
-  );
+  const [inlineEdit, setInlineEdit] = useState<InlineEdit | null>(null);
   const [editedKeys, setEditedKeys] = useState<Set<string>>(() => new Set());
   const [groqReady, setGroqReady] = useState<boolean>(() => hasGroqKey());
+
+  // ---------- AI OCR (position-aware), per PDF page ----------
+  const [ocrLinesByPage, setOcrLinesByPage] = useState<Map<number, PdfTextLine[]>>(() => new Map());
+  const [ocrBusyPage, setOcrBusyPage] = useState<number | null>(null);
+  const [focusLineKey, setFocusLineKey] = useState<string | null>(null);
 
   // ---------- Merge / split ----------
   const [mergeFiles, setMergeFiles] = useState<MergeItem[]>([]);
@@ -153,6 +186,8 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
   const historyRef = useRef<PdfOverlay[][]>([]);
   const redoRef = useRef<PdfOverlay[][]>([]);
   const extractTriedRef = useRef<string>('');
+  /** overlays as they were before a Cover & Retype box was placed (for 1-step undo) */
+  const coverBaseRef = useRef<PdfOverlay[] | null>(null);
 
   const meta = pages[selectedPageIdx] ?? null;
   const metaKey = meta ? `${meta.id}:${meta.extraRotation}` : '';
@@ -161,6 +196,66 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
     [overlays, meta]
   );
   const selectedOverlay = overlays.find((o) => o.id === selectedOverlayId) || null;
+
+  // =====================================================================
+  // Text index + AI OCR lines
+  // Scanned pages get their lines from Groq vision (approximate boxes). The
+  // merged index is what every edit path below uses, so an OCR'd scan behaves
+  // exactly like a real text-layer page.
+  // =====================================================================
+  const mergedTextIndex = useMemo<PdfTextIndex | null>(() => {
+    if (!textIndex && ocrLinesByPage.size === 0) return null;
+
+    const base = textIndex;
+    const pageNumbers = new Set<number>();
+    base?.pages.forEach((p) => pageNumbers.add(p.page));
+    ocrLinesByPage.forEach((lines, page) => {
+      const stillInDocument = pages.some((m) => m.originalIndex === page - 1);
+      if (lines.length > 0 && stillInDocument) pageNumbers.add(page);
+    });
+
+    const outPages: PdfPageText[] = [];
+    const scannedPages: number[] = [];
+    let totalChars = 0;
+
+    for (const pageNumber of [...pageNumbers].sort((a, b) => a - b)) {
+      const basePage = base?.pages.find((p) => p.page === pageNumber);
+      const pageMeta = pages.find((p) => p.originalIndex === pageNumber - 1);
+      const realLines: PdfTextLine[] = (basePage?.lines ?? []).map((l) => ({
+        ...l,
+        source: l.source ?? 'text',
+      }));
+      const ocrLines = (ocrLinesByPage.get(pageNumber) ?? []).map((l) => ({
+        ...l,
+        source: 'ocr' as const,
+      }));
+      const lines = mergeOcrIntoLines(realLines, ocrLines);
+      const charCount = lines.reduce((n, l) => n + l.text.length, 0);
+      const realChars = realLines.reduce((n, l) => n + l.text.length, 0);
+      totalChars += charCount;
+      if (realChars < 4 && ocrLines.length === 0) scannedPages.push(pageNumber);
+      outPages.push({
+        page: pageNumber,
+        widthPt: basePage?.widthPt ?? pageMeta?.baseW ?? 612,
+        heightPt: basePage?.heightPt ?? pageMeta?.baseH ?? 792,
+        lines,
+        charCount,
+      });
+    }
+
+    return {
+      pages: outPages,
+      totalChars,
+      pageCount: base?.pageCount ?? pages.length,
+      scannedPages,
+    };
+  }, [textIndex, ocrLinesByPage, pages]);
+
+  const pageTextInfo = useCallback(
+    (pageNumber: number): PdfPageText | undefined =>
+      mergedTextIndex?.pages.find((p) => p.page === pageNumber),
+    [mergedTextIndex]
+  );
 
   // =====================================================================
   // Loading
@@ -218,7 +313,11 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
       setExtractError(null);
       setExtractProgress(null);
       setEditedKeys(new Set());
-      setEditingLine(null);
+      setInlineEdit(null);
+      setOcrLinesByPage(new Map());
+      setOcrBusyPage(null);
+      setFocusLineKey(null);
+      coverBaseRef.current = null;
       extractTriedRef.current = '';
       historyRef.current = [];
       redoRef.current = [];
@@ -363,7 +462,7 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
         console.error(err);
         if (!cancelled) {
           setExtractError(
-            'Could not read the text layer of this PDF. If it is a scanned photo, use Whiteout + Add Text instead.'
+            'Could not read the text layer of this PDF. If it is a scanned photo, use Cover & Retype, or read the page with AI.'
           );
           setExtractProgress(null);
         }
@@ -413,9 +512,52 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
 
   const deleteSelected = useCallback(() => {
     if (!selectedOverlayId) return;
+    // Deleting the not-yet-applied Cover & Retype box = cancelling it, so the
+    // document never gets a history entry for a box the operator abandoned.
+    if (inlineEdit?.kind === 'free' && inlineEdit.overlayId === selectedOverlayId) {
+      setOverlays((prev) => coverBaseRef.current ?? prev.filter((o) => o.id !== selectedOverlayId));
+      coverBaseRef.current = null;
+      setInlineEdit(null);
+      setSelectedOverlayId(null);
+      return;
+    }
     mutateOverlays((prev) => prev.filter((o) => o.id !== selectedOverlayId));
     setSelectedOverlayId(null);
-  }, [mutateOverlays, selectedOverlayId]);
+  }, [inlineEdit, mutateOverlays, selectedOverlayId]);
+
+  /**
+   * Drop the box of an un-applied Cover & Retype. The whiteout was placed
+   * without a history entry, so cancelling must restore the snapshot directly.
+   */
+  const discardFreeBox = useCallback((overlayId: string) => {
+    setOverlays((prev) => {
+      const base = coverBaseRef.current;
+      coverBaseRef.current = null;
+      return base ?? prev.filter((o) => o.id !== overlayId);
+    });
+    setSelectedOverlayId(null);
+  }, []);
+
+  /** Close the inline card (line mode just closes; free mode also removes the box). */
+  const cancelInlineEdit = useCallback(
+    (current: InlineEdit | null) => {
+      if (current?.kind === 'free') discardFreeBox(current.overlayId);
+      setInlineEdit(null);
+    },
+    [discardFreeBox]
+  );
+
+  // A Cover & Retype box belongs to the page it was placed on — drop it when the
+  // operator flips pages (it was never committed to the document yet).
+  const lastPageRef = useRef<number>(selectedPageIdx);
+  useEffect(() => {
+    if (lastPageRef.current === selectedPageIdx) return;
+    lastPageRef.current = selectedPageIdx;
+    if (inlineEdit?.kind === 'free') {
+      discardFreeBox(inlineEdit.overlayId);
+      setInlineEdit(null);
+    }
+  }, [discardFreeBox, inlineEdit, selectedPageIdx]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -440,14 +582,42 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
         return;
       }
       if (e.key === 'Escape') {
+        if (inlineEdit) {
+          e.preventDefault();
+          cancelInlineEdit(inlineEdit);
+        }
         setTool('move');
         setSelectedOverlayId(null);
-        setEditingLine(null);
+        return;
+      }
+      // R = Cover & Retype — works on scans and on real PDFs alike.
+      if (
+        !typing &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.key === 'r' || e.key === 'R') &&
+        pages.length > 0
+      ) {
+        e.preventDefault();
+        setTool('cover_retype');
+        setStatus({
+          kind: 'info',
+          text: 'Cover & Retype: click on the page where the old text is — a whiteout box opens with a typing card. Esc cancels.',
+        });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [deleteSelected, redo, undo, selectedOverlayId]);
+  }, [
+    cancelInlineEdit,
+    deleteSelected,
+    inlineEdit,
+    pages.length,
+    redo,
+    selectedOverlayId,
+    undo,
+  ]);
 
   // =====================================================================
   // Add overlays
@@ -492,7 +662,7 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
     newText: string,
     opts: { silent?: boolean } = {}
   ) => {
-    const pageInfo = textIndex?.pages.find((p) => p.page === pageNumber);
+    const pageInfo = pageTextInfo(pageNumber);
     if (!pageInfo) {
       setStatus({ kind: 'error', text: 'Text for that page is not ready yet. Please wait a second and try again.' });
       return;
@@ -524,6 +694,170 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
     }
   };
 
+  // =====================================================================
+  // Cover & Retype — free text over a whiteout box (no text layer needed)
+  // =====================================================================
+  const applyFreeTextEdit = (
+    edit: Extract<InlineEdit, { kind: 'free' }>,
+    opts: { silent?: boolean } = {}
+  ) => {
+    const pageMeta = pages.find((p) => p.originalIndex === edit.page - 1);
+    if (!pageMeta) {
+      setStatus({ kind: 'error', text: 'That page is not in this document any more.' });
+      setInlineEdit(null);
+      return;
+    }
+    const box = overlays.find((o) => o.id === edit.overlayId);
+    if (!box) {
+      coverBaseRef.current = null;
+      setStatus({ kind: 'error', text: 'The whiteout box was removed — click the page again with Cover & Retype.' });
+      setInlineEdit(null);
+      return;
+    }
+    // Boxes live in the *displayed* page space, so measure against the view size.
+    const vs = viewSize(pageMeta);
+    const res = buildFreeTextOverlays(
+      { widthPt: vs.w, heightPt: vs.h },
+      { x: box.x, y: box.y, w: box.w, h: box.h },
+      edit.value,
+      { color: textColor }
+    );
+
+    const base = coverBaseRef.current;
+    // The box already lives in the displayed page space, so the new text needs
+    // the same pageId as the box — no rotation maths required.
+    const textOverlays = res.overlays
+      .filter((o) => o.kind !== 'whiteout')
+      .map((o) => ({ ...o, pageId: box.pageId }));
+    setOverlays((prev) => {
+      // One history entry for the whole action: undo removes box *and* text.
+      historyRef.current.push(base ?? prev);
+      if (historyRef.current.length > 60) historyRef.current.shift();
+      redoRef.current = [];
+      return [...prev, ...textOverlays];
+    });
+    coverBaseRef.current = null;
+    setSelectedOverlayId(textOverlays[textOverlays.length - 1]?.id ?? edit.overlayId);
+    setInlineEdit(null);
+
+    if (!opts.silent) {
+      const hadText = Boolean(edit.value.trim());
+      setStatus({
+        kind: res.warnings.length ? 'info' : 'ok',
+        text: res.warnings.length
+          ? res.warnings.join(' ')
+          : hadText
+          ? 'Covered and retyped — press Ctrl+Z to undo, then download the PDF.'
+          : 'Whiteout box kept — press Ctrl+Z to undo.',
+      });
+    }
+  };
+
+  // =====================================================================
+  // AI OCR for one page: read the page image and keep the line boxes, so the
+  // scan becomes click-to-edit exactly like a real text layer.
+  // =====================================================================
+  const runPageOcr = useCallback(
+    async (pageNumber: number): Promise<{ lineCount: number; text: string }> => {
+      if (!pdfBytes) throw new Error('Open a PDF first.');
+      const pageMeta = pages.find((p) => p.originalIndex === pageNumber - 1);
+      if (!pageMeta) throw new Error('That page is not in this document any more.');
+
+      if (!hasGroqKey()) {
+        const message = 'Add your Groq key first — AI page reading needs it.';
+        setStatus({
+          kind: 'error',
+          text: message,
+          actions: [{ label: 'Open Groq settings', onClick: () => onOpenGroqModal?.() }],
+        });
+        throw new Error(message);
+      }
+
+      setOcrBusyPage(pageNumber);
+      setStatus({ kind: 'info', text: `AI is reading page ${pageNumber}… this takes a few seconds.` });
+
+      try {
+        const rotation = normalizeRotation(pageMeta.intrinsicRotation + pageMeta.extraRotation);
+        const rendered = await renderPdfPageToDataUrl(pdfBytes, pageNumber - 1, {
+          scale: 2,
+          rotation,
+          mime: 'image/jpeg',
+          quality: 0.92,
+          doc: pdfDocRef.current ?? undefined,
+        });
+
+        const boxes = await ocrPageWithBoxes(rendered.dataUrl, {
+          widthPt: rendered.widthPt,
+          heightPt: rendered.heightPt,
+        });
+
+        // OCR boxes follow the *displayed* orientation → map back to intrinsic.
+        const extra = normalizeRotation(pageMeta.extraRotation);
+        const vs = viewSize(pageMeta);
+        const mapped =
+          extra === 0
+            ? boxes
+            : boxes.map((b) => ({
+                ...b,
+                ...rotateNormalizedRect(
+                  { x: b.x, y: b.y, w: b.w, h: b.h },
+                  vs.w,
+                  vs.h,
+                  (360 - extra) % 360
+                ),
+              }));
+
+        const extracted = textIndex?.pages.find((p) => p.page === pageNumber);
+        const lines = ocrBoxesToLines(
+          {
+            page: pageNumber,
+            widthPt: extracted?.widthPt ?? pageMeta.baseW,
+            heightPt: extracted?.heightPt ?? pageMeta.baseH,
+          },
+          mapped
+        );
+
+        if (lines.length === 0) {
+          throw new Error(
+            'AI could not find any text on this page. Try a sharper photo or a higher-resolution scan.'
+          );
+        }
+
+        setOcrLinesByPage((prev) => {
+          const next = new Map(prev);
+          next.set(pageNumber, lines);
+          return next;
+        });
+        // Show the operator straight away that the page is now editable.
+        setTextPanelOpen(true);
+        setAiOpen(false);
+        setFocusLineKey(`${pageNumber}:${lines[0].id}`);
+        setStatus({
+          kind: 'ok',
+          text: `AI read page ${pageNumber}: ${lines.length} line${
+            lines.length === 1 ? '' : 's'
+          } found — they are now click-to-edit in the Text panel.`,
+        });
+        return { lineCount: lines.length, text: boxes.map((b) => b.text).join('\n') };
+      } catch (err: any) {
+        const message = String(err?.message || 'AI could not read this page.');
+        const needsSettings =
+          isGroqApiError(err) && (err.status === 401 || err.code === 'no_model');
+        setStatus({
+          kind: 'error',
+          text: message,
+          actions: needsSettings
+            ? [{ label: 'Open Groq settings', onClick: () => onOpenGroqModal?.() }]
+            : undefined,
+        });
+        throw new Error(message);
+      } finally {
+        setOcrBusyPage(null);
+      }
+    },
+    [pdfBytes, pages, textIndex, onOpenGroqModal]
+  );
+
   const handleStageClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (tool === 'move') return;
     const stage = stageRef.current;
@@ -539,22 +873,81 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
 
     if (tool === 'text_edit') {
       const pdfPage = current.originalIndex + 1;
-      const pageInfo = textIndex?.pages.find((p) => p.page === pdfPage);
+      const pageInfo = pageTextInfo(pdfPage);
       const point = displayPointToIntrinsic(current, nx, ny);
       const line = hitTestLine(pageInfo, point.x, point.y);
       if (!line) {
+        const hasRealText = Boolean(
+          pageInfo && pageInfo.lines.some((l) => (l.source ?? 'text') === 'text')
+        );
+        if (pageInfo && !hasRealText) {
+          // Dead end no more: give the operator the two things that actually work.
+          setStatus({
+            kind: 'info',
+            text: 'This page is a scan — it has no text layer. Either cover and retype it, or let AI read it so its lines become clickable.',
+            actions: [
+              {
+                label: 'Cover & Retype',
+                onClick: () => {
+                  setTool('cover_retype');
+                  setStatus({
+                    kind: 'info',
+                    text: 'Cover & Retype: click on the page where the old text is — a whiteout box opens with a typing card. Esc cancels.',
+                  });
+                },
+              },
+              {
+                label: 'Read page with AI',
+                onClick: () => {
+                  void runPageOcr(pdfPage).catch(() => undefined);
+                },
+              },
+            ],
+          });
+          return;
+        }
         setStatus({
           kind: 'info',
           text: pageInfo
-            ? 'No editable text exactly there — this page may be a scan, or the click missed the line. Try the Text panel on the right.'
+            ? 'No editable text exactly there — the click missed the line. Try the Text panel on the right.'
             : extracting
             ? 'Still reading this PDF — try again in a moment.'
             : 'Text not read yet. Open the Text panel and press “Try reading again”.',
         });
         return;
       }
-      setEditingLine({ page: pdfPage, line, value: line.text });
+      setInlineEdit({ kind: 'line', page: pdfPage, line, value: line.text });
       setTextPanelOpen(true);
+      setTool('move');
+      return;
+    }
+
+    if (tool === 'cover_retype') {
+      // Replacing an un-applied box: drop it first, then place the new one.
+      if (inlineEdit?.kind === 'free') cancelInlineEdit(inlineEdit);
+      const item: PdfOverlay = {
+        id: newOverlayId(),
+        pageId: current.id,
+        kind: 'whiteout',
+        x: clamp(nx - COVER_RETYPE_W / 2, 0, 1 - COVER_RETYPE_W),
+        y: clamp(ny - COVER_RETYPE_H / 2, 0, 1 - COVER_RETYPE_H),
+        w: COVER_RETYPE_W,
+        h: COVER_RETYPE_H,
+        origin: 'manual',
+        note: 'cover-retype mask',
+      };
+      // No history entry yet — the whole action is committed on Apply.
+      setOverlays((prev) => {
+        coverBaseRef.current = prev;
+        return [...prev, item];
+      });
+      setSelectedOverlayId(item.id);
+      setInlineEdit({
+        kind: 'free',
+        page: current.originalIndex + 1,
+        overlayId: item.id,
+        value: '',
+      });
       setTool('move');
       return;
     }
@@ -640,7 +1033,10 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
     setSelectedOverlayId(item.id);
     const stage = stageRef.current;
     if (!stage) return;
-    mutateOverlays((prev) => prev, true); // snapshot for undo
+    // The pending Cover & Retype box is not committed yet — its single history
+    // entry is created on Apply, so dragging it must not record anything.
+    const pendingFreeId = inlineEdit?.kind === 'free' ? inlineEdit.overlayId : null;
+    mutateOverlays((prev) => prev, item.id !== pendingFreeId);
     dragRef.current = { id: item.id, startX: e.clientX, startY: e.clientY, origX: item.x, origY: item.y };
 
     const onMove = (ev: MouseEvent) => {
@@ -914,6 +1310,19 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
         <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
       )}
       <span className="flex-1">{status.text}</span>
+      {status.actions?.map((action) => (
+        <button
+          key={action.label}
+          onClick={action.onClick}
+          className={`shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+            status.kind === 'error'
+              ? 'bg-rose-900/60 hover:bg-rose-800 border-rose-700 text-rose-100'
+              : 'bg-emerald-700/60 hover:bg-emerald-600 border-emerald-600 text-white'
+          }`}
+        >
+          {action.label}
+        </button>
+      ))}
       <button onClick={() => setStatus(null)} className="opacity-60 hover:opacity-100">
         <X className="w-3.5 h-3.5" />
       </button>
@@ -1005,9 +1414,9 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
               title="Every line of text in this PDF, ready to edit"
             >
               <Pencil className="w-3.5 h-3.5" /> Text
-              {textIndex && textIndex.totalChars > 0 && (
+              {mergedTextIndex && mergedTextIndex.totalChars > 0 && (
                 <span className="text-[9px] px-1 rounded bg-black/30 font-mono">
-                  {textIndex.pages.reduce((n, p) => n + p.lines.length, 0)}
+                  {mergedTextIndex.pages.reduce((n, p) => n + p.lines.length, 0)}
                 </span>
               )}
             </button>
@@ -1048,6 +1457,20 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
                   () => setTool('whiteout'),
                   <Eraser className="w-3.5 h-3.5" />,
                   'Whiteout',
+                  'hover:border-amber-500'
+                )}
+                {toolBtn(
+                  tool === 'cover_retype',
+                  () => setTool('cover_retype'),
+                  <span className="flex items-center">
+                    <Eraser className="w-3.5 h-3.5" />
+                    <Type className="w-3.5 h-3.5 -ml-1" />
+                  </span>,
+                  <>
+                    Cover &amp; Retype
+                    <span className="urdu-naskh font-normal ml-1">ڈھانپیں اور لکھیں</span>
+                    <span className="text-[9px] px-1 rounded bg-black/30 font-mono ml-1">R</span>
+                  </>,
                   'hover:border-amber-500'
                 )}
                 {toolBtn(tool === 'text_urdu', () => setTool('text_urdu'), <Type className="w-3.5 h-3.5" />, '+ اردو ٹیکسٹ')}
@@ -1237,6 +1660,11 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
                             Click any line of text on the page to rewrite it in place ·{' '}
                             <kbd className="font-mono">Esc</kbd> to cancel
                           </>
+                        ) : tool === 'cover_retype' ? (
+                          <>
+                            Click on the page where the old text is — a whiteout box opens and you type
+                            the replacement · <kbd className="font-mono">Esc</kbd> to cancel
+                          </>
                         ) : (
                           <>
                             Click on the page to place{' '}
@@ -1251,68 +1679,132 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
                       </div>
                     )}
 
-                    {/* Direct line editor (click-to-edit on the page) */}
-                    {editingLine && (
+                    {/* Inline editor card — click-to-edit line, or Cover & Retype free text */}
+                    {inlineEdit && (
                       <div className="mb-2 w-full max-w-3xl bg-slate-900 border-2 border-emerald-500 rounded-xl px-3 py-2.5 shadow-2xl space-y-2">
                         <div className="flex items-center gap-2 text-[11px] font-bold text-emerald-300">
-                          <Pencil className="w-3.5 h-3.5" />
-                          Editing page {editingLine.page}
-                          <span className="text-slate-500 font-mono font-normal">
-                            {editingLine.line.id} · {editingLine.line.fontSize.toFixed(1)} pt ·{' '}
-                            {editingLine.line.rtl ? 'اردو' : 'English'}
-                          </span>
+                          {inlineEdit.kind === 'line' ? (
+                            <Pencil className="w-3.5 h-3.5" />
+                          ) : (
+                            <span className="flex items-center text-emerald-300">
+                              <Eraser className="w-3.5 h-3.5" />
+                              <Type className="w-3.5 h-3.5 -ml-1" />
+                            </span>
+                          )}
+                          {inlineEdit.kind === 'line' ? (
+                            <span>Editing page {inlineEdit.page}</span>
+                          ) : (
+                            <span>
+                              Cover &amp; Retype · page {inlineEdit.page}{' '}
+                              <span className="urdu-naskh font-normal">ڈھانپیں اور لکھیں</span>
+                            </span>
+                          )}
+                          {inlineEdit.kind === 'line' ? (
+                            <span className="text-slate-500 font-mono font-normal">
+                              {inlineEdit.line.id} · {inlineEdit.line.fontSize.toFixed(1)} pt ·{' '}
+                              {inlineEdit.line.rtl ? 'اردو' : 'English'}
+                              {inlineEdit.line.source === 'ocr' ? ' · AI box' : ''}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500 font-mono font-normal">
+                              whiteout {Math.round(COVER_RETYPE_W * 100)}% ×{' '}
+                              {Math.round(COVER_RETYPE_H * 100)}%
+                            </span>
+                          )}
                           <button
-                            onClick={() => setEditingLine(null)}
+                            onClick={() => cancelInlineEdit(inlineEdit)}
                             className="ml-auto p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
                             title="Close (Esc)"
                           >
                             <X className="w-3 h-3" />
                           </button>
                         </div>
+                        {inlineEdit.kind === 'free' && (
+                          <p className="text-[10px] text-slate-400 leading-relaxed">
+                            The whiteout box stays on the page. Your text is fitted inside it — Urdu is
+                            right-aligned automatically. Works on scans and on normal PDFs.
+                          </p>
+                        )}
                         <textarea
                           autoFocus
-                          dir={editingLine.line.rtl ? 'rtl' : 'ltr'}
-                          value={editingLine.value}
+                          dir={
+                            inlineEdit.kind === 'line'
+                              ? inlineEdit.line.rtl
+                                ? 'rtl'
+                                : 'ltr'
+                              : 'auto'
+                          }
+                          value={inlineEdit.value}
+                          placeholder={inlineEdit.kind === 'free' ? 'Type replacement…' : undefined}
                           onChange={(e) =>
-                            setEditingLine((prev) => (prev ? { ...prev, value: e.target.value } : prev))
+                            setInlineEdit((prev) =>
+                              prev ? { ...prev, value: e.target.value } : prev
+                            )
                           }
                           onKeyDown={(e) => {
                             if (e.key === 'Escape') {
                               e.preventDefault();
-                              setEditingLine(null);
+                              e.stopPropagation();
+                              cancelInlineEdit(inlineEdit);
+                              return;
                             }
                             if (e.key === 'Enter' && !e.shiftKey) {
                               e.preventDefault();
-                              applyLineEdit(editingLine.page, editingLine.line, editingLine.value);
-                              setEditingLine(null);
+                              if (inlineEdit.kind === 'line') {
+                                applyLineEdit(inlineEdit.page, inlineEdit.line, inlineEdit.value);
+                                setInlineEdit(null);
+                              } else {
+                                applyFreeTextEdit(inlineEdit);
+                              }
                             }
                           }}
                           rows={2}
-                          className={`w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white outline-none focus:border-emerald-500 ${
-                            editingLine.line.rtl ? 'urdu-nastaliq' : ''
+                          className={`w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white outline-none focus:border-emerald-500 placeholder:text-slate-500 ${
+                            inlineEdit.kind === 'line'
+                              ? inlineEdit.line.rtl
+                                ? 'urdu-nastaliq'
+                                : ''
+                              : looksRtl(inlineEdit.value)
+                              ? 'urdu-nastaliq'
+                              : ''
                           }`}
                         />
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             onClick={() => {
-                              applyLineEdit(editingLine.page, editingLine.line, editingLine.value);
-                              setEditingLine(null);
+                              if (inlineEdit.kind === 'line') {
+                                applyLineEdit(inlineEdit.page, inlineEdit.line, inlineEdit.value);
+                                setInlineEdit(null);
+                              } else {
+                                applyFreeTextEdit(inlineEdit);
+                              }
                             }}
                             className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1"
                           >
                             <CheckCircle2 className="w-3.5 h-3.5" /> Apply to page
                           </button>
+                          {inlineEdit.kind === 'line' ? (
+                            <button
+                              onClick={() => {
+                                applyLineEdit(inlineEdit.page, inlineEdit.line, '');
+                                setInlineEdit(null);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" /> Delete line
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => cancelInlineEdit(inlineEdit)}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold flex items-center gap-1"
+                              title="Remove the whiteout box and the typed text"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" /> Delete box
+                              <span className="urdu-naskh font-normal">ڈبہ حذف</span>
+                            </button>
+                          )}
                           <button
-                            onClick={() => {
-                              applyLineEdit(editingLine.page, editingLine.line, '');
-                              setEditingLine(null);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold flex items-center gap-1"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" /> Delete line
-                          </button>
-                          <button
-                            onClick={() => setEditingLine(null)}
+                            onClick={() => cancelInlineEdit(inlineEdit)}
                             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
                           >
                             Cancel
@@ -1529,7 +2021,7 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
                 hasPdf={pages.length > 0}
                 pdfName={pdfName}
                 pageCount={pages.length}
-                textIndex={textIndex}
+                textIndex={mergedTextIndex}
                 extracting={extracting}
                 extractError={extractError}
                 groqReady={groqReady}
@@ -1548,7 +2040,7 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
               <PdfTextEditor
                 pdfName={pdfName}
                 hasPdf={pages.length > 0}
-                textIndex={textIndex}
+                textIndex={mergedTextIndex}
                 extracting={extracting}
                 extractProgress={extractProgress}
                 extractError={extractError}
@@ -1566,17 +2058,18 @@ export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingF
                 onRemove={(page, line) => applyLineEdit(page, line, '')}
                 onEditOnPage={(page, line) => {
                   setSelectedPageIdx(pageIndexForAiPage(page));
-                  setEditingLine({ page, line, value: line.text });
+                  setInlineEdit({ kind: 'line', page, line, value: line.text });
                 }}
-                onOcrPage={async (page) => {
-                  if (!pdfBytes) throw new Error('Open a PDF first.');
-                  const rendered = await renderPdfPageToDataUrl(pdfBytes, page - 1, {
-                    scale: 1.7,
-                    mime: 'image/jpeg',
-                    quality: 0.9,
-                    doc: pdfDocRef.current ?? undefined,
+                onOcrPage={(page) => runPageOcr(page)}
+                ocrBusyPage={ocrBusyPage}
+                focusLineKey={focusLineKey}
+                onCoverRetype={(page) => {
+                  setSelectedPageIdx(pageIndexForAiPage(page));
+                  setTool('cover_retype');
+                  setStatus({
+                    kind: 'info',
+                    text: 'Cover & Retype: click on the page where the old text is — a whiteout box opens with a typing card. Esc cancels.',
                   });
-                  return extractDocumentOcrWithGroq(rendered.dataUrl);
                 }}
                 onClose={() => setTextPanelOpen(false)}
               />
