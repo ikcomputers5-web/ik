@@ -6,6 +6,15 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
 
 ## ✨ Key Modules Included
 
+### 0. 📲 Scan & Order Station (`کیو آر سے فائل وصول کریں`) — NEW
+- **Customer sends the file, not a WhatsApp photo of it.** Print a QR sticker once, stick it on the counter. The customer scans it with their phone camera, picks the service (Print / Photostat, PDF edit, Composing, Passport photo, CNIC copy, Scan), chooses the file and taps send.
+- **The file lands directly in the shop PC queue** — with the customer's name, phone number, the service they chose and any instructions.
+- **Live transfer, no upload server needed**: files stream over the same hybrid transport as the mobile keyboard (WebRTC → shop LAN WebSocket → same-tab), so it also works on a hosted Vercel deployment.
+- **Chunked + deduplicated transfer** (32 KB base64 chunks, 25 MB limit, live % progress, ordering-safe) — a dropped packet or a duplicate over two transports can never corrupt a customer file.
+- **One-click hand-off**: PDF orders open straight in the PDF Editor (text already read), image orders open straight in the Image → PDF toner-saver cleaner.
+- **Printable QR sticker** with shop name and Urdu instructions, copy-link for WhatsApp, and a station code you can regenerate anytime.
+- Files live only in the browser tab: save anything you want to keep before refreshing.
+
 ### 1. 📝 Urdu & English Composing Studio (`آئی کے اردو کمپوزنگ اسٹوڈیو`)
 - **📱 Live Mobile Urdu Keyboard Pairing (WebSocket + QR Code)**:
   - Click **"Use Mobile Keyboard"** in the Urdu Composer → scan the QR code on your smartphone!
@@ -43,6 +52,13 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
   - **Drag & Drop** any PDF straight onto the page, **Rotate / Delete / Re-order Pages**, optional **Page Numbering**.
   - **Undo / Redo** (`Ctrl+Z` / `Ctrl+Y`), `Delete` to remove the selected edit, `Esc` to cancel a tool.
   - **True WYSIWYG** — the on-screen preview is produced by the exact same rasteriser that writes the final PDF, so what you see is what prints. Rotated pages are flattened at 260 DPI so they print correctly too.
+- **📖 Automatic Text Reading + Click-to-Edit (NEW)** — the moment you open a PDF, every line of its text layer is read in the background:
+  - Open the **Text** panel to see the whole document as editable lines — search for a name, date or number across pages, then click a line and rewrite it.
+  - Or pick the **Edit Text** tool and click straight on the page: the old glyphs are covered and the new text is typed in the same position, at the same size and direction (right-aligned for Urdu, left-aligned for English) — fully undoable with `Ctrl + Z`.
+  - Long replacements are shrunk automatically to fit, with an honest warning when they may overlap neighbouring text.
+  - `Enter` applies, `Shift+Enter` adds a line, `Esc` cancels; empty text deletes the line.
+  - Copy all text or download the document text as `.txt` (useful for typing jobs).
+  - **Scanned pages** (no text layer) are detected and flagged — one tap sends the page to Groq Vision OCR and shows the recognised text.
 - **AI PDF Assistant (Groq)** — the shop's own "type an order" editor:
   - Upload the customer PDF and simply write, in **English / Roman Urdu / Urdu**:
     - `Replace the name Ahmed with Bilal` → the AI finds that exact text, white-outs it and types the new name in the same place, same size.
@@ -83,7 +99,7 @@ This project is pre-configured for **Vercel** (`vercel.json` + serverless `/api/
 1. Push / merge this branch to your GitHub repo (`ikcomputers5-web/ik`).
 2. Go to [vercel.com/new](https://vercel.com/new) and import `ikcomputers5-web/ik`.
 3. Click **Deploy** (Build Command: `npm run build`, Output Directory: `dist` — auto-detected from `vercel.json`).
-4. Even on Vercel (`https://your-shop.vercel.app`), scanning the **Mobile Keyboard QR Code** pairs your phone directly to your Shop PC over **WebRTC Cloud Sync**!
+4. Even on Vercel (`https://your-shop.vercel.app`), scanning the **Mobile Keyboard QR Code** pairs your phone directly to your Shop PC over **WebRTC Cloud Sync** — and the same transport carries the **Scan & Order** file queue.
 
 ---
 

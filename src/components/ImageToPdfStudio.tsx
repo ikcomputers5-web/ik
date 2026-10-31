@@ -28,7 +28,12 @@ interface ScannedPageItem {
   contrast: number;
 }
 
-export const ImageToPdfStudio: React.FC = () => {
+interface ImageToPdfStudioProps {
+  /** Images handed over from another module (e.g. the Scan & Order queue). */
+  incomingFiles?: { files: File[]; nonce: number } | null;
+}
+
+export const ImageToPdfStudio: React.FC<ImageToPdfStudioProps> = ({ incomingFiles }) => {
   const [items, setItems] = useState<ScannedPageItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paperSize, setPaperSize] = useState<'a4' | 'legal' | 'fit'>('a4');
@@ -49,13 +54,12 @@ export const ImageToPdfStudio: React.FC = () => {
     return canvas.toDataURL('image/jpeg', 0.9);
   };
 
-  const handleUploadImages = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const addImageFiles = async (fileList: File[]) => {
+    if (fileList.length === 0) return;
     setBusy(true);
     const created: ScannedPageItem[] = [];
 
-    for (const file of Array.from(files)) {
+    for (const file of fileList) {
       const url: string = await new Promise((resolve) => {
         const r = new FileReader();
         r.onload = () => resolve(String(r.result));
@@ -79,9 +83,22 @@ export const ImageToPdfStudio: React.FC = () => {
       if (!selectedId && next[0]) setSelectedId(next[0].id);
       return next;
     });
-    e.target.value = '';
     setBusy(false);
   };
+
+  const handleUploadImages = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    const list = files ? Array.from(files) : [];
+    e.target.value = '';
+    await addImageFiles(list);
+  };
+
+  // Accept images handed over from the Scan & Order station
+  useEffect(() => {
+    if (!incomingFiles?.files?.length) return;
+    void addImageFiles(incomingFiles.files);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomingFiles?.nonce]);
 
   const updateItem = async (id: string, patch: Partial<ScannedPageItem>) => {
     const target = items.find((x) => x.id === id);

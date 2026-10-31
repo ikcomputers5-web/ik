@@ -13,6 +13,7 @@ import {
   Menu,
   X,
   CheckCircle2,
+  QrCode,
 } from 'lucide-react';
 import { LiveComposing } from './components/LiveComposing';
 import { UrduComposer } from './components/UrduComposer';
@@ -24,10 +25,13 @@ import { IdAndPassportStudio } from './components/IdAndPassportStudio';
 import { CvBuilderStudio } from './components/CvBuilderStudio';
 import { ShopUtilitiesHub } from './components/ShopUtilitiesHub';
 import { MobileKeyboardView } from './components/MobileKeyboardView';
+import { MobileOrderView } from './components/MobileOrderView';
+import { ScanOrderStation } from './components/ScanOrderStation';
 import { GroqSettingsModal } from './components/GroqSettingsModal';
 import { hasGroqKey } from './lib/groqClient';
 
 type ModuleKey =
+  | 'scan_order'
   | 'live_composing'
   | 'urdu_composer'
   | 'id_card_maker'
@@ -45,6 +49,12 @@ export const App: React.FC = () => {
     return params.get('mobile');
   });
 
+  // Customer "scan to order" page: /?order=STATION_CODE
+  const [orderRoomParam, setOrderRoomParam] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('order');
+  });
+
   const [activeModule, setActiveModule] = useState<ModuleKey>(new URLSearchParams(window.location.search).has('live') ? 'live_composing' : 'urdu_composer');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [groqModalOpen, setGroqModalOpen] = useState<boolean>(false);
@@ -52,6 +62,10 @@ export const App: React.FC = () => {
 
   // Cross-module handoff states
   const [passportIncomingPhoto, setPassportIncomingPhoto] = useState<string | null>(null);
+  const [pdfIncomingFile, setPdfIncomingFile] = useState<{ file: File; nonce: number } | null>(null);
+  const [imageIncomingFiles, setImageIncomingFiles] = useState<{ files: File[]; nonce: number } | null>(
+    null
+  );
   const [composerIncomingHtml, setComposerIncomingHtml] = useState<{
     html: string;
     nonce: number;
@@ -65,6 +79,20 @@ export const App: React.FC = () => {
 
   const liveMobileRoom = new URLSearchParams(window.location.search).get('mobilelive');
   if (liveMobileRoom) return <LiveComposing mobile initialRoom={liveMobileRoom} />;
+
+  if (orderRoomParam) {
+    return (
+      <MobileOrderView
+        initialRoom={orderRoomParam}
+        onExitMobileMode={() => {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('order');
+          window.history.replaceState({}, '', url.toString());
+          setOrderRoomParam(null);
+        }}
+      />
+    );
+  }
 
   if (mobileRoomParam) {
     return (
@@ -87,6 +115,13 @@ export const App: React.FC = () => {
     badge?: string;
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
+    {
+      key: 'scan_order',
+      labelEn: 'Scan & Order (QR)',
+      labelUr: 'کیو آر سے فائل وصول کریں',
+      badge: 'New',
+      icon: QrCode,
+    },
     { key: 'live_composing', labelEn: 'Live Mobile Composing', labelUr: 'موبائل سے براہ راست لکھیں', badge: 'Live', icon: Smartphone },
     {
       key: 'urdu_composer',
@@ -281,15 +316,33 @@ export const App: React.FC = () => {
             />
           )}
 
+          {activeModule === 'scan_order' && (
+            <ScanOrderStation
+              onOpenFile={(file) => {
+                const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
+                if (isPdf) {
+                  setPdfIncomingFile({ file, nonce: Date.now() });
+                  setActiveModule('pdf_studio');
+                } else {
+                  setImageIncomingFiles({ files: [file], nonce: Date.now() });
+                  setActiveModule('img_to_pdf');
+                }
+              }}
+            />
+          )}
+
           {activeModule === 'live_composing' && <LiveComposing />}
 
           {activeModule === 'id_card_maker' && <IdCardPageMaker />}
 
           {activeModule === 'pdf_studio' && (
-            <PdfStudio onOpenGroqModal={() => setGroqModalOpen(true)} />
+            <PdfStudio
+              onOpenGroqModal={() => setGroqModalOpen(true)}
+              incomingFile={pdfIncomingFile}
+            />
           )}
 
-          {activeModule === 'img_to_pdf' && <ImageToPdfStudio />}
+          {activeModule === 'img_to_pdf' && <ImageToPdfStudio incomingFiles={imageIncomingFiles} />}
 
           {activeModule === 'bg_remover' && (
             <BackgroundRemoverStudio
