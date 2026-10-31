@@ -368,6 +368,8 @@ async function callGroqChat(
       if (isRetiredModel(res.status, message)) break;
       break;
     }
+    // Every model shares the same key quota — no point hammering the API.
+    if (sawRateLimit) break;
   }
 
   if (sawRateLimit) throw new GroqApiError(RATE_LIMIT_MESSAGE, 429, 'rate_limit');
