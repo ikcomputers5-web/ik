@@ -9,13 +9,40 @@ import Peer, { DataConnection } from 'peerjs';
 export interface SyncMessage {
   msgId?: string;
   revision?: number;
-  type: 'live_document' | 'room_status' | 'insert_text' | 'live_composing' | 'command' | 'context_sync' | 'hello';
+  type:
+    | 'live_document'
+    | 'room_status'
+    | 'insert_text'
+    | 'live_composing'
+    | 'command'
+    | 'context_sync'
+    | 'hello'
+    // --- Scan & Order (customer phone -> shop PC) ---
+    | 'order_start'
+    | 'order_chunk'
+    | 'order_end'
+    | 'order_ack'
+    | 'order_done'
+    | 'order_cancel';
   room?: string;
   text?: string;
   action?: 'backspace' | 'enter' | 'undo' | 'space';
   lastWord?: string;
   desktopCount?: number;
   mobileCount?: number;
+  /** order id shared by all messages of one customer upload */
+  orderId?: string;
+  name?: string;
+  phone?: string;
+  service?: string;
+  notes?: string;
+  fileName?: string;
+  mime?: string;
+  size?: number;
+  totalChunks?: number;
+  seq?: number;
+  data?: string;
+  error?: string;
 }
 
 function getHostNamespace(): string {
@@ -253,6 +280,20 @@ export class HybridMobileSync {
     };
 
     connectWs();
+  }
+
+  /** Bytes still queued in the WebRTC data channels (used to pace file uploads). */
+  public bufferedAmount(): number {
+    let max = 0;
+    for (const conn of this.peerConns) {
+      try {
+        const dc = conn.dataChannel;
+        if (dc && typeof dc.bufferedAmount === 'number') max = Math.max(max, dc.bufferedAmount);
+      } catch {
+        /* ignore */
+      }
+    }
+    return max;
   }
 
   public send(payload: Omit<SyncMessage, 'msgId'>) {

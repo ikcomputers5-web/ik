@@ -6,7 +6,8 @@ import {
   normalizeRotation,
   type PDFDocumentProxy,
 } from '../lib/pdfjs';
-import { extractPdfText, type PdfTextIndex } from '../lib/pdfText';
+import { extractPdfText, type PdfTextIndex, type PdfTextLine } from '../lib/pdfText';
+import { buildLineReplaceOverlays, hitTestLine } from '../lib/pdfTextEdit';
 import {
   ensureOverlayFonts,
   fitTextOverlay,
@@ -17,9 +18,10 @@ import {
   type PdfOverlay,
 } from '../lib/pdfOverlay';
 import { buildEditedPdf, pageViewSize } from '../lib/pdfExport';
-import { hasGroqKey } from '../lib/groqClient';
+import { extractDocumentOcrWithGroq, hasGroqKey } from '../lib/groqClient';
 import type { AiDraft } from '../lib/pdfAiEdit';
 import { PdfAiAssistant } from './PdfAiAssistant';
+import { PdfTextEditor } from './PdfTextEditor';
 import {
   FileUp,
   Type,
@@ -42,10 +44,13 @@ import {
   AlertTriangle,
   CheckCircle2,
   X,
+  Pencil,
+  Search,
+  Copy,
 } from 'lucide-react';
 
 type PdfTab = 'editor' | 'merge' | 'split';
-type EditorTool = 'move' | 'whiteout' | 'text_urdu' | 'text_en';
+type EditorTool = 'move' | 'whiteout' | 'text_urdu' | 'text_en' | 'text_edit';
 
 interface PageMeta {
   id: string;
@@ -89,7 +94,13 @@ function downloadBytes(bytes: Uint8Array, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGroqModal }) => {
+interface PdfStudioProps {
+  onOpenGroqModal?: () => void;
+  /** A file handed over from another module (e.g. the Scan & Order queue). */
+  incomingFile?: { file: File; nonce: number } | null;
+}
+
+export const PdfStudio: React.FC<PdfStudioProps> = ({ onOpenGroqModal, incomingFile }) => {
   const [activeTab, setActiveTab] = useState<PdfTab>('editor');
 
   // ---------- Document state ----------
@@ -118,6 +129,13 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
   const [textIndex, setTextIndex] = useState<PdfTextIndex | null>(null);
   const [extracting, setExtracting] = useState<boolean>(false);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(null);
+  const [extractNonce, setExtractNonce] = useState<number>(0);
+  const [textPanelOpen, setTextPanelOpen] = useState<boolean>(false);
+  const [editingLine, setEditingLine] = useState<{ page: number; line: PdfTextLine; value: string } | null>(
+    null
+  );
+  const [editedKeys, setEditedKeys] = useState<Set<string>>(() => new Set());
   const [groqReady, setGroqReady] = useState<boolean>(() => hasGroqKey());
 
   // ---------- Merge / split ----------
@@ -198,6 +216,9 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
       setSelectedPageIdx(0);
       setTextIndex(null);
       setExtractError(null);
+      setExtractProgress(null);
+      setEditedKeys(new Set());
+      setEditingLine(null);
       extractTriedRef.current = '';
       historyRef.current = [];
       redoRef.current = [];
@@ -218,6 +239,13 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
       setBusy(false);
     }
   }, []);
+
+  // Open a file handed over from the Scan & Order station
+  useEffect(() => {
+    if (!incomingFile?.file) return;
+    void loadPdfFile(incomingFile.file);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomingFile?.nonce]);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -305,19 +333,31 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
   }, []);
 
   // =====================================================================
-  // AI text index (lazy, only when the assistant is opened)
+  // Automatic text reading — runs on every upload, not on demand.
+  // The whole document's text layer is indexed in the background so the
+  // operator can click any line and edit it immediately.
   // =====================================================================
   useEffect(() => {
-    if (!aiOpen || !pdfBytes || textIndex || extracting) return;
-    const token = `${pdfName}|${pages.length}|${pdfBytes.length}`;
+    if (!pdfBytes) return;
+    const token = `${pdfName}|${pdfBytes.length}|${extractNonce}`;
     if (extractTriedRef.current === token) return;
     extractTriedRef.current = token;
     let cancelled = false;
     setExtracting(true);
     setExtractError(null);
-    extractPdfText(pdfBytes, { maxPages: 40 })
+    setExtractProgress(null);
+    setTextIndex(null);
+    extractPdfText(pdfBytes, {
+      maxPages: 60,
+      onProgress: (done, total) => {
+        if (!cancelled) setExtractProgress({ done, total });
+      },
+    })
       .then((idx) => {
-        if (!cancelled) setTextIndex(idx);
+        if (!cancelled) {
+          setTextIndex(idx);
+          setExtractProgress(null);
+        }
       })
       .catch((err) => {
         console.error(err);
@@ -325,6 +365,7 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
           setExtractError(
             'Could not read the text layer of this PDF. If it is a scanned photo, use Whiteout + Add Text instead.'
           );
+          setExtractProgress(null);
         }
       })
       .finally(() => {
@@ -333,7 +374,7 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
     return () => {
       cancelled = true;
     };
-  }, [aiOpen, pdfBytes, textIndex, extracting, pdfName, pages.length]);
+  }, [pdfBytes, extractNonce, pdfName]);
 
   // =====================================================================
   // Overlay mutations (with undo / redo)
@@ -401,6 +442,7 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
       if (e.key === 'Escape') {
         setTool('move');
         setSelectedOverlayId(null);
+        setEditingLine(null);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -432,6 +474,56 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
     [mutateOverlays, pages]
   );
 
+  /** Undo the user's extra page rotation for a click point (display → PDF space). */
+  const displayPointToIntrinsic = (meta: PageMeta, nx: number, ny: number) => {
+    const deg = normalizeRotation(meta.extraRotation);
+    if (deg === 90) return { x: ny, y: 1 - nx };
+    if (deg === 180) return { x: 1 - nx, y: 1 - ny };
+    if (deg === 270) return { x: 1 - ny, y: nx };
+    return { x: nx, y: ny };
+  };
+
+  const lineKey = (page: number, line: PdfTextLine) => `${page}:${line.id}`;
+
+  /** Rewrite one extracted line in place (or delete it when newText is empty). */
+  const applyLineEdit = (
+    pageNumber: number,
+    line: PdfTextLine,
+    newText: string,
+    opts: { silent?: boolean } = {}
+  ) => {
+    const pageInfo = textIndex?.pages.find((p) => p.page === pageNumber);
+    if (!pageInfo) {
+      setStatus({ kind: 'error', text: 'Text for that page is not ready yet. Please wait a second and try again.' });
+      return;
+    }
+    const res = buildLineReplaceOverlays(pageInfo, line, newText, { color: textColor });
+    applyAiDrafts([
+      {
+        id: uid('draft'),
+        page: pageNumber,
+        label: `Page ${pageNumber} · ${newText.trim() ? 'rewrite' : 'delete'} line`,
+        overlays: res.overlays,
+        warnings: res.warnings,
+      },
+    ]);
+    setEditedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(lineKey(pageNumber, line));
+      return next;
+    });
+    if (!opts.silent) {
+      setStatus({
+        kind: res.warnings.length ? 'info' : 'ok',
+        text: res.warnings.length
+          ? res.warnings.join(' ')
+          : newText.trim()
+          ? 'Text replaced in place — press Ctrl+Z to undo, then download the PDF.'
+          : 'Line removed — press Ctrl+Z to undo, then download the PDF.',
+      });
+    }
+  };
+
   const handleStageClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (tool === 'move') return;
     const stage = stageRef.current;
@@ -444,6 +536,28 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
     const nx = clamp((e.clientX - rect.left) / rect.width, 0.01, 0.99);
     const ny = clamp((e.clientY - rect.top) / rect.height, 0.01, 0.99);
     const vs = viewSize(current);
+
+    if (tool === 'text_edit') {
+      const pdfPage = current.originalIndex + 1;
+      const pageInfo = textIndex?.pages.find((p) => p.page === pdfPage);
+      const point = displayPointToIntrinsic(current, nx, ny);
+      const line = hitTestLine(pageInfo, point.x, point.y);
+      if (!line) {
+        setStatus({
+          kind: 'info',
+          text: pageInfo
+            ? 'No editable text exactly there — this page may be a scan, or the click missed the line. Try the Text panel on the right.'
+            : extracting
+            ? 'Still reading this PDF — try again in a moment.'
+            : 'Text not read yet. Open the Text panel and press “Try reading again”.',
+        });
+        return;
+      }
+      setEditingLine({ page: pdfPage, line, value: line.text });
+      setTextPanelOpen(true);
+      setTool('move');
+      return;
+    }
 
     if (tool === 'whiteout') {
       const w = 0.26;
@@ -860,7 +974,12 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
         {activeTab === 'editor' && (
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setAiOpen((v) => !v)}
+              onClick={() =>
+                setAiOpen((v) => {
+                  if (!v) setTextPanelOpen(false);
+                  return !v;
+                })
+              }
               className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition ${
                 aiOpen
                   ? 'bg-emerald-600 border-emerald-500 text-white'
@@ -869,6 +988,28 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
               title="Tell the AI what to replace, add or remove"
             >
               <Sparkles className="w-3.5 h-3.5" /> AI Assistant
+            </button>
+            <button
+              onClick={() => {
+                setTextPanelOpen((v) => {
+                  if (!v) setAiOpen(false);
+                  return !v;
+                });
+                setTool((t) => (t === 'text_edit' ? 'move' : t));
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition ${
+                textPanelOpen
+                  ? 'bg-sky-600 border-sky-500 text-white'
+                  : 'bg-slate-800 border-slate-700 text-sky-200 hover:bg-slate-700'
+              }`}
+              title="Every line of text in this PDF, ready to edit"
+            >
+              <Pencil className="w-3.5 h-3.5" /> Text
+              {textIndex && textIndex.totalChars > 0 && (
+                <span className="text-[9px] px-1 rounded bg-black/30 font-mono">
+                  {textIndex.pages.reduce((n, p) => n + p.lines.length, 0)}
+                </span>
+              )}
             </button>
             <button
               onClick={handleExportEditedPdf}
@@ -892,6 +1033,16 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
             {pages.length > 0 && (
               <div className="bg-slate-900/70 border-b border-slate-800 px-3 py-2 flex flex-wrap items-center gap-1.5 shrink-0">
                 {toolBtn(tool === 'move', () => setTool('move'), <Move className="w-3.5 h-3.5" />, 'Move / Edit')}
+                {toolBtn(
+                  tool === 'text_edit',
+                  () => {
+                    setTool('text_edit');
+                    setTextPanelOpen(true);
+                  },
+                  <Pencil className="w-3.5 h-3.5" />,
+                  'Edit Text',
+                  'hover:border-emerald-500'
+                )}
                 {toolBtn(
                   tool === 'whiteout',
                   () => setTool('whiteout'),
@@ -966,8 +1117,9 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
                       </div>
                       <h3 className="text-base font-bold text-white mb-1">Open Any PDF to Edit</h3>
                       <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
-                        Drag &amp; drop a PDF here, or pick a file. Erase old text, add Urdu Nastaliq /
-                        English text, stamp signatures or photos.
+                        Drag &amp; drop a PDF here. Its text is read automatically — click any line and
+                        rewrite it in place. Erase old text, add Urdu Nastaliq / English text, stamp
+                        signatures or photos.
                       </p>
                       <span className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold">
                         {busy ? 'Opening…' : 'Choose PDF File'}
@@ -1080,9 +1232,95 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
                   <div className="flex-1 overflow-auto p-4 flex flex-col items-center min-w-0">
                     {tool !== 'move' && (
                       <div className="mb-2 px-3.5 py-1.5 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-200 text-[11px] font-semibold">
-                        Click on the page to place{' '}
-                        {tool === 'whiteout' ? 'a whiteout box' : tool === 'text_urdu' ? 'Urdu text' : 'English text'}
-                        {' '}· <kbd className="font-mono">Esc</kbd> to cancel
+                        {tool === 'text_edit' ? (
+                          <>
+                            Click any line of text on the page to rewrite it in place ·{' '}
+                            <kbd className="font-mono">Esc</kbd> to cancel
+                          </>
+                        ) : (
+                          <>
+                            Click on the page to place{' '}
+                            {tool === 'whiteout'
+                              ? 'a whiteout box'
+                              : tool === 'text_urdu'
+                              ? 'Urdu text'
+                              : 'English text'}{' '}
+                            · <kbd className="font-mono">Esc</kbd> to cancel
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Direct line editor (click-to-edit on the page) */}
+                    {editingLine && (
+                      <div className="mb-2 w-full max-w-3xl bg-slate-900 border-2 border-emerald-500 rounded-xl px-3 py-2.5 shadow-2xl space-y-2">
+                        <div className="flex items-center gap-2 text-[11px] font-bold text-emerald-300">
+                          <Pencil className="w-3.5 h-3.5" />
+                          Editing page {editingLine.page}
+                          <span className="text-slate-500 font-mono font-normal">
+                            {editingLine.line.id} · {editingLine.line.fontSize.toFixed(1)} pt ·{' '}
+                            {editingLine.line.rtl ? 'اردو' : 'English'}
+                          </span>
+                          <button
+                            onClick={() => setEditingLine(null)}
+                            className="ml-auto p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+                            title="Close (Esc)"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                        <textarea
+                          autoFocus
+                          dir={editingLine.line.rtl ? 'rtl' : 'ltr'}
+                          value={editingLine.value}
+                          onChange={(e) =>
+                            setEditingLine((prev) => (prev ? { ...prev, value: e.target.value } : prev))
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setEditingLine(null);
+                            }
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              applyLineEdit(editingLine.page, editingLine.line, editingLine.value);
+                              setEditingLine(null);
+                            }
+                          }}
+                          rows={2}
+                          className={`w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white outline-none focus:border-emerald-500 ${
+                            editingLine.line.rtl ? 'urdu-nastaliq' : ''
+                          }`}
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => {
+                              applyLineEdit(editingLine.page, editingLine.line, editingLine.value);
+                              setEditingLine(null);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Apply to page
+                          </button>
+                          <button
+                            onClick={() => {
+                              applyLineEdit(editingLine.page, editingLine.line, '');
+                              setEditingLine(null);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Delete line
+                          </button>
+                          <button
+                            onClick={() => setEditingLine(null)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold"
+                          >
+                            Cancel
+                          </button>
+                          <span className="text-[10px] text-slate-500">
+                            Enter = apply · Shift+Enter = new line · Esc = cancel
+                          </span>
+                        </div>
                       </div>
                     )}
 
@@ -1300,6 +1538,47 @@ export const PdfStudio: React.FC<{ onOpenGroqModal?: () => void }> = ({ onOpenGr
                 onApplyDrafts={applyAiDrafts}
                 onFocusPage={(page) => setSelectedPageIdx(pageIndexForAiPage(page))}
                 onClose={() => setAiOpen(false)}
+              />
+            </div>
+          )}
+
+          {/* Editable-text panel — auto-filled as soon as a PDF is opened */}
+          {textPanelOpen && (
+            <div className="fixed lg:static inset-y-14 right-0 z-40 flex">
+              <PdfTextEditor
+                pdfName={pdfName}
+                hasPdf={pages.length > 0}
+                textIndex={textIndex}
+                extracting={extracting}
+                extractProgress={extractProgress}
+                extractError={extractError}
+                currentPage={pages[selectedPageIdx]?.originalIndex + 1 || 1}
+                editedKeys={editedKeys}
+                groqReady={groqReady}
+                onOpenSettings={() => onOpenGroqModal?.()}
+                onPickPdf={() => fileInputRef.current?.click()}
+                onRetryExtract={() => {
+                  extractTriedRef.current = '';
+                  setExtractNonce((n) => n + 1);
+                }}
+                onFocusPage={(page) => setSelectedPageIdx(pageIndexForAiPage(page))}
+                onReplace={(page, line, text) => applyLineEdit(page, line, text)}
+                onRemove={(page, line) => applyLineEdit(page, line, '')}
+                onEditOnPage={(page, line) => {
+                  setSelectedPageIdx(pageIndexForAiPage(page));
+                  setEditingLine({ page, line, value: line.text });
+                }}
+                onOcrPage={async (page) => {
+                  if (!pdfBytes) throw new Error('Open a PDF first.');
+                  const rendered = await renderPdfPageToDataUrl(pdfBytes, page - 1, {
+                    scale: 1.7,
+                    mime: 'image/jpeg',
+                    quality: 0.9,
+                    doc: pdfDocRef.current ?? undefined,
+                  });
+                  return extractDocumentOcrWithGroq(rendered.dataUrl);
+                }}
+                onClose={() => setTextPanelOpen(false)}
               />
             </div>
           )}
