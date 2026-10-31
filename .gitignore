@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 .vite/
+.venv/
 .cache/
 *.log
 .DS_Store
