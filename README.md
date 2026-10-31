@@ -47,18 +47,29 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
 ### 3. 📄 Visual PDF Studio + 🤖 AI PDF Assistant (Edit, Replace, Merge & Split)
 - **Visual PDF Page Editor**:
   - **Whiteout / Eraser Box**: Cover old dates, names, or form text cleanly on any PDF.
+  - **✏️ Cover & Retype (`ڈھانپیں اور لکھیں`)** — the tool for phone photos and scans that have **no text layer at all**:
+    - Press `R` (or click the tool), then click straight on the old text. A whiteout box (`26% × 5%`) is placed exactly there and a typing card opens in **free-text mode** — nothing has to exist in the PDF for this to work.
+    - Type the replacement (Urdu or English — RTL is detected automatically), press `Apply`, and the new text is placed inside the box, right-anchored for Urdu, auto-shrunk until it fits, and typed at the same baseline as the old value.
+    - `Delete box` removes the cover and the text together; **one `Ctrl+Z` undoes the whole action** (box + text = a single history step). `Esc` cancels before anything is written.
+    - Works identically on real text-layer PDFs and on scanned images.
   - **Add Urdu Nastaliq or English Text**: Place real Nastaliq Urdu or English text anywhere on existing PDF pages (rasterised at ≈216 DPI so ligatures stay perfect in print).
   - **Place Signatures, Stamps, or Photos**: Drag & scale onto forms.
   - **Drag & Drop** any PDF straight onto the page, **Rotate / Delete / Re-order Pages**, optional **Page Numbering**.
   - **Undo / Redo** (`Ctrl+Z` / `Ctrl+Y`), `Delete` to remove the selected edit, `Esc` to cancel a tool.
   - **True WYSIWYG** — the on-screen preview is produced by the exact same rasteriser that writes the final PDF, so what you see is what prints. Rotated pages are flattened at 260 DPI so they print correctly too.
-- **📖 Automatic Text Reading + Click-to-Edit (NEW)** — the moment you open a PDF, every line of its text layer is read in the background:
+- **📖 Automatic Text Reading + Click-to-Edit** — the moment you open a PDF, every line of its text layer is read in the background:
   - Open the **Text** panel to see the whole document as editable lines — search for a name, date or number across pages, then click a line and rewrite it.
   - Or pick the **Edit Text** tool and click straight on the page: the old glyphs are covered and the new text is typed in the same position, at the same size and direction (right-aligned for Urdu, left-aligned for English) — fully undoable with `Ctrl + Z`.
   - Long replacements are shrunk automatically to fit, with an honest warning when they may overlap neighbouring text.
   - `Enter` applies, `Shift+Enter` adds a line, `Esc` cancels; empty text deletes the line.
   - Copy all text or download the document text as `.txt` (useful for typing jobs).
-  - **Scanned pages** (no text layer) are detected and flagged — one tap sends the page to Groq Vision OCR and shows the recognised text.
+- **🔍 Position-aware AI OCR — scans become click-to-edit (NEW)**:
+  - Scanned pages (no text layer) are detected per page. The page card offers **“Read page with AI (OCR)”** and, once read, **“Re-read with AI”** with a live line count.
+  - The AI returns **every visual line with its own box** (`{text, x, y, w, h}` fractions of the page, one object per line, price column kept separate from the description column, Urdu script preserved exactly).
+  - Those boxes become real editable lines (`source: 'ocr'`, ids `OCR1…`), so the **Edit Text tool, the Text panel, search and the AI assistant all work on a scan exactly like on a real PDF** — click “2,200”, type “2,500”, Apply.
+  - AI lines carry an amber **`approx position`** badge (with a tooltip) because the box is an estimate — check it before printing. Real text-layer lines always win: re-reading a normal PDF can never damage its click-to-edit lines.
+  - After reading, the Text panel opens by itself and scrolls to the first AI line, so the operator immediately sees the page is editable.
+  - Clicking **Edit Text** on a page with no text layer no longer dead-ends — it offers **Cover & Retype** and **Read page with AI** as one-click actions.
 - **AI PDF Assistant (Groq)** — the shop's own "type an order" editor:
   - Upload the customer PDF and simply write, in **English / Roman Urdu / Urdu**:
     - `Replace the name Ahmed with Bilal` → the AI finds that exact text, white-outs it and types the new name in the same place, same size.
@@ -87,6 +98,9 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
 
 ### 7. 🤖 Groq AI Hub, `<20KB` Portal Compressor & Shop POS Bill Counter
 - **Groq API Key Support**: Powers AI Urdu/English Document Writer, **Photo-to-Text Vision OCR** (extracts Urdu & English text from photographed papers!), Roman-Urdu converter, and translator.
+- **Retired-model proof model handling**: Groq removes model IDs without warning (the Llama 4 vision models were pulled). The app now asks `GET /models` for the live list, tries only models your key can actually use, **skips any retired ID automatically**, remembers the winning vision model (`ik_groq_vision_model_v1`) and puts it first next time. A dead `smartModel`/`fastModel` degrades to a working model instead of failing.
+  - After **Test connection** the settings window lists every model as a **clickable chip** — 👁 marks the ones that can read photos/scans. Tap a chip to use it for Vision / Composing / Word suggestions; it is saved instantly and shown as `Vision: qwen/qwen3.8-27b ✓`.
+  - Friendly, actionable errors: bad key → *“Your Groq key is invalid or expired…”*, throttled → *“Groq is rate-limiting. Wait 30 seconds…”*, nothing usable → *“No vision model is available on this key…”* with a shortcut to Groq settings.
 - **Online Portal KB Compressor**: Compress JPGs to exact `≤ 15KB / 20KB / 30KB / 50KB / 100KB` for PPSC, FPSC, NTS, NADRA Pak-ID & Passport uploads.
 - **IK Computers Quick Bill & Cash Receipt Printer**: Editable shop service rates + printable customer receipt.
 

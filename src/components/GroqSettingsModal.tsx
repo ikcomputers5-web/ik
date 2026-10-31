@@ -4,8 +4,19 @@ import {
   getGroqSettings,
   saveGroqSettings,
   testGroqConnection,
+  getRememberedVisionModel,
+  isVisionModelId,
+  pickVisionModelFrom,
   GroqSettings,
 } from '../lib/groqClient';
+
+type ModelTarget = 'vision' | 'smart' | 'fast';
+
+const TARGET_LABEL: Record<ModelTarget, string> = {
+  vision: 'Vision (OCR)',
+  smart: 'Composing & Writer',
+  fast: 'Word suggestions',
+};
 
 interface GroqSettingsModalProps {
   open: boolean;
@@ -17,6 +28,7 @@ export const GroqSettingsModal: React.FC<GroqSettingsModalProps> = ({ open, onCl
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [status, setStatus] = useState<{ ok?: boolean; message?: string; models?: string[] }>({});
+  const [target, setTarget] = useState<ModelTarget>('vision');
 
   useEffect(() => {
     if (open) {
@@ -33,11 +45,19 @@ export const GroqSettingsModal: React.FC<GroqSettingsModalProps> = ({ open, onCl
     const res = await testGroqConnection(settings.apiKey);
     setTesting(false);
     if (res.ok) {
+      const resolvedVision = pickVisionModelFrom(
+        res.models,
+        settings.visionModel,
+        getRememberedVisionModel()
+      );
       setStatus({
         ok: true,
         message: `Connected! ${res.models.length} Groq LPU models ready for IK Computers.`,
         models: res.models,
       });
+      if (resolvedVision && !settings.visionModel) {
+        setSettings((prev) => ({ ...prev, visionModel: resolvedVision }));
+      }
     } else {
       setStatus({
         ok: false,
@@ -46,10 +66,30 @@ export const GroqSettingsModal: React.FC<GroqSettingsModalProps> = ({ open, onCl
     }
   };
 
+  /** One tap on a chip = use this model, saved immediately. */
+  const applyModel = (id: string, explicitTarget?: ModelTarget) => {
+    const to = explicitTarget ?? target;
+    const patch: Partial<GroqSettings> =
+      to === 'vision'
+        ? { visionModel: id }
+        : to === 'smart'
+        ? { smartModel: id }
+        : { fastModel: id };
+    const next = saveGroqSettings({ ...settings, ...patch });
+    setSettings(next);
+  };
+
   const handleSave = () => {
     saveGroqSettings(settings);
     onClose();
   };
+
+  const models = status.models ?? [];
+  const visionModels = models.filter(isVisionModelId);
+  const resolvedVision =
+    pickVisionModelFrom(models, settings.visionModel, getRememberedVisionModel()) ||
+    settings.visionModel ||
+    '';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
@@ -103,7 +143,7 @@ export const GroqSettingsModal: React.FC<GroqSettingsModalProps> = ({ open, onCl
                 className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-white flex items-center gap-1.5 shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
-                Test Key
+                Test connection
               </button>
             </div>
             <p className="text-[11px] text-slate-400 mt-1.5">
@@ -167,11 +207,78 @@ export const GroqSettingsModal: React.FC<GroqSettingsModalProps> = ({ open, onCl
               list="groq-models-list"
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200"
             />
+            {resolvedVision && (
+              <p className="text-[11px] text-emerald-400 mt-1 font-mono break-all">
+                Vision: {resolvedVision} ✓
+              </p>
+            )}
+            <p className="text-[10.5px] text-slate-500 mt-1">
+              If a model is retired, the app finds a working one automatically — you never have to edit this
+              field by hand.
+            </p>
           </div>
 
-          {status.models && status.models.length > 0 && (
+          {models.length > 0 && (
+            <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold text-slate-300">Set which model?</span>
+                {(['vision', 'smart', 'fast'] as ModelTarget[]).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTarget(t)}
+                    className={`px-2 py-0.5 rounded-md text-[10.5px] font-bold border ${
+                      target === t
+                        ? 'bg-emerald-600 border-emerald-500 text-white'
+                        : 'bg-slate-800 border-slate-700 text-slate-300'
+                    }`}
+                  >
+                    {TARGET_LABEL[t]}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+                {models.map((m) => {
+                  const vision = isVisionModelId(m);
+                  const active =
+                    m === settings.visionModel || m === settings.smartModel || m === settings.fastModel;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => applyModel(m)}
+                      title={`Use ${m} for ${TARGET_LABEL[target]}`}
+                      className={`px-2 py-1 rounded-md text-[10px] font-mono border flex items-center gap-1 ${
+                        active
+                          ? 'bg-emerald-950 border-emerald-600 text-emerald-200'
+                          : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-emerald-500'
+                      }`}
+                    >
+                      {m}
+                      {vision && (
+                        <span title="Can read images (OCR)" aria-label="vision capable">
+                          👁
+                        </span>
+                      )}
+                      {active && <CheckCircle2 className="w-3 h-3 text-emerald-400" />}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                👁 = can read photos/scans (OCR). Tap a chip to use that model — it is saved immediately.
+                {visionModels.length === 0 && models.length > 0
+                  ? ' No vision model was found on this key yet; press Test connection again after the key is saved.'
+                  : ''}
+              </p>
+            </div>
+          )}
+
+          {models.length > 0 && (
             <datalist id="groq-models-list">
-              {status.models.map((m) => (
+              {models.map((m) => (
                 <option key={m} value={m} />
               ))}
             </datalist>
