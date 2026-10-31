@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>D&D Rate List — Updated Logo & Rates</title>
+  <link rel="icon" href="logo.jpeg" />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #171310;
+      --muted: #6f665d;
+      --line: #e7ded4;
+      --paper: #ffffff;
+      --bg: #f4efe8;
+      --accent: #d9822b;
+      --accent-dark: #b8661b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand img { width: 84px; height: auto; border-radius: 8px; }
+    h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+    .sub { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 8px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #e8f6ec;
+      color: #1d7a3a;
+      font-size: 11px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .seg button {
+      border: 0;
+      background: transparent;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .seg button.active { background: var(--ink); color: #fff; }
+    .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { border-color: #cbbba9; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-dark); }
+    .zoom { display: inline-flex; align-items: center; gap: 6px; }
+    .zoom .btn { padding: 8px 10px; min-width: 36px; justify-content: center; }
+    #zoomLabel { font-size: 12px; color: var(--muted); min-width: 44px; text-align: center; }
+    main { padding: 24px 16px 48px; overflow: auto; }
+    .sheet-wrap { display: flex; justify-content: center; }
+    .sheet {
+      background: var(--paper);
+      box-shadow: 0 18px 50px rgba(35, 25, 15, 0.16), 0 2px 8px rgba(35, 25, 15, 0.08);
+      border-radius: 4px;
+      overflow: hidden;
+      line-height: 0;
+      width: min(100%, 760px);
+    }
+    .sheet img { width: 100%; height: auto; display: block; }
+    .note {
+      max-width: 760px;
+      margin: 18px auto 0;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+    @media (max-width: 640px) {
+      header { padding: 12px; }
+      .brand img { width: 64px; }
+      h1 { font-size: 15px; }
+      .controls { width: 100%; justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img src="logo.jpeg" alt="D&D Dress & Design logo" />
+      <div>
+        <h1>D&D Rate List <span class="badge">Logo + rates updated</span></h1>
+        <p class="sub">New header/watermark logo and revised rates for items 1–9.</p>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Preview version">
+        <button id="btnUpdated" class="active" type="button">Updated</button>
+        <button id="btnOriginal" type="button">Original</button>
+      </div>
+      <div class="zoom">
+        <button class="btn" id="zoomOut" type="button" aria-label="Zoom out">−</button>
+        <span id="zoomLabel">Fit</span>
+        <button class="btn" id="zoomIn" type="button" aria-label="Zoom in">+</button>
+      </div>
+      <a class="btn" id="openPdf" href="D&amp;D-Rate-List-Updated.pdf" target="_blank" rel="noopener">Open PDF</a>
+      <a class="btn primary" id="downloadPdf" href="D&amp;D-Rate-List-Updated.pdf" download="D&D Rate List - Updated.pdf">Download PDF</a>
+    </div>
+  </header>
+  <main>
+    <div class="sheet-wrap">
+      <div class="sheet" id="sheet">
+        <img id="preview" src="updated-preview.png?v=2" alt="Updated D&D rate list PDF preview" />
+      </div>
+    </div>
+    <p class="note">Updated rates: 1) 2,000 · 2) 2,200 · 3) 2,200 · 4) 2,400 · 5) 2,400 · 6) 2,300 · 7) 2,500 · 8) 2,500 · 9) 2,800. Items 10–24 and Urdu text are unchanged. Use Original/Updated to compare, or download the final PDF.</p>
+  </main>
+  <script>
+    const preview = document.getElementById('preview');
+    const sheet = document.getElementById('sheet');
+    const btnUpdated = document.getElementById('btnUpdated');
+    const btnOriginal = document.getElementById('btnOriginal');
+    const openPdf = document.getElementById('openPdf');
+    const downloadPdf = document.getElementById('downloadPdf');
+    const zoomLabel = document.getElementById('zoomLabel');
+    const PDFS = {
+      updated: { img: 'updated-preview.png?v=2', pdf: 'D&D-Rate-List-Updated.pdf?v=2', name: 'D&D Rate List - Updated.pdf' },
+      original: { img: 'original-preview.png?v=2', pdf: 'original.pdf?v=2', name: 'D&D Rate List - Original.pdf' }
+    };
+    let version = 'updated';
+    let zoom = 1;
+    function render() {
+      const v = PDFS[version];
+      preview.src = v.img;
+      preview.alt = version === 'updated' ? 'Updated D&D rate list PDF preview' : 'Original D&D rate list PDF preview';
+      openPdf.href = v.pdf;
+      downloadPdf.href = v.pdf;
+      downloadPdf.download = v.name;
+      btnUpdated.classList.toggle('active', version === 'updated');
+      btnOriginal.classList.toggle('active', version === 'original');
+      sheet.style.width = zoom === 1 ? 'min(100%, 760px)' : Math.round(760 * zoom) + 'px';
+      sheet.style.maxWidth = zoom === 1 ? '' : 'none';
+      zoomLabel.textContent = zoom === 1 ? 'Fit' : Math.round(zoom * 100) + '%';
+    }
+    btnUpdated.addEventListener('click', () => { version = 'updated'; render(); });
+    btnOriginal.addEventListener('click', () => { version = 'original'; render(); });
+    document.getElementById('zoomIn').addEventListener('click', () => { zoom = Math.min(2.5, zoom + 0.25); render(); });
+    document.getElementById('zoomOut').addEventListener('click', () => { zoom = Math.max(0.5, zoom - 0.25); render(); });
+    render();
+  </script>
+</body>
+</html>
