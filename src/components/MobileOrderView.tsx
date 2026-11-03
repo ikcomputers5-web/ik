@@ -34,6 +34,35 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
 
   const [connected, setConnected] = useState(false);
   const [transport, setTransport] = useState('Connecting…');
+  const [latency, setLatency] = useState<number | null>(null);
+  const [copies, setCopies] = useState(1);
+  const [waitSeconds, setWaitSeconds] = useState(0);
+  const [settings, setSettings] = useState<{ name?: string; phone?: string; address?: string }>({
+    name: 'IK COMPUTERS',
+  });
+
+  // The phone shows the shop's own name/phone, not a generic label.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('ik_shop_settings');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.name) setSettings(parsed);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Honest waiting feedback: “trying for 12 s”.
+  useEffect(() => {
+    if (connected) {
+      setWaitSeconds(0);
+      return;
+    }
+    const iv = setInterval(() => setWaitSeconds((s) => s + 1), 1000);
+    return () => clearInterval(iv);
+  }, [connected]);
 
   const [service, setService] = useState<string>(ORDER_SERVICES[0].id);
   const [name, setName] = useState(() => localStorage.getItem('ik_order_name') || '');
@@ -44,7 +73,12 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
 
   const [stage, setStage] = useState<Stage>('form');
   const [progress, setProgress] = useState(0);
-  const [sentSummary, setSentSummary] = useState<{ fileName: string; service: string; size: number } | null>(null);
+  const [sentSummary, setSentSummary] = useState<{
+    fileName: string;
+    service: string;
+    size: number;
+    confirmed: boolean;
+  } | null>(null);
   const [error, setError] = useState('');
 
   const syncRef = useRef<HybridMobileSync | null>(null);
@@ -54,9 +88,10 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
     const sync = new HybridMobileSync({
       room: syncRoom,
       role: 'mobile',
-      onStatusChange: ({ connected: ok, transport: t }) => {
+      onStatusChange: ({ connected: ok, transport: t, latency: l }) => {
         setConnected(ok);
         setTransport(t);
+        setLatency(l);
       },
       onMessage: (msg) => {
         if (msg.type === 'order_done') {
@@ -117,15 +152,24 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
     localStorage.setItem('ik_order_name', name.trim());
     localStorage.setItem('ik_order_phone', phone.trim());
     try {
-      await sendOrderWithFile(
+      const result = await sendOrderWithFile(
         syncRef.current,
-        { name, phone, service, notes },
+        { name, phone, service, notes, copies },
         file,
-        (sent, total) => setProgress(Math.round((sent / total) * 100))
+        {
+          onProgress: (sent, total) => setProgress(Math.round((sent / total) * 100)),
+          waitForConfirm: true,
+          confirmTimeoutMs: 15000,
+        }
       );
-      setSentSummary({ fileName: file.name, service: activeService.label, size: file.size });
-      // Stay on "sending" until the shop PC confirms, but do not trap the customer.
-      setTimeout(() => setStage((s) => (s === 'sending' ? 'sent' : s)), 4000);
+      const confirmed = !String(result).startsWith('unconfirmed:');
+      setSentSummary({
+        fileName: file.name,
+        service: activeService.label,
+        size: file.size,
+        confirmed,
+      });
+      setStage('sent');
     } catch (err: any) {
       setStage('form');
       setError(String(err?.message || 'Could not send the file. Please try again.'));
@@ -148,11 +192,29 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
         <div className="flex-1 flex items-center justify-center p-5">
           <div className="w-full max-w-sm text-center">
-            <div className="w-20 h-20 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-4">
-              <CheckCircle2 className="w-11 h-11" />
+            <div
+              className={`w-20 h-20 mx-auto rounded-full flex items-center justify-center mb-4 ${
+                sentSummary.confirmed
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-amber-500/20 text-amber-300'
+              }`}
+            >
+              {sentSummary.confirmed ? (
+                <CheckCircle2 className="w-11 h-11" />
+              ) : (
+                <AlertTriangle className="w-11 h-11" />
+              )}
             </div>
-            <h1 className="text-xl font-extrabold text-white">Sent to IK Computers</h1>
-            <p className="urdu-nastaliq text-emerald-400 text-base mt-1 mb-3">فائل دکان تک پہنچ گئی ہے</p>
+            <h1 className="text-xl font-extrabold text-white">
+              {sentSummary.confirmed ? 'Received by IK Computers' : 'Sent — awaiting shop confirmation'}
+            </h1>
+            <p
+              className={`urdu-nastaliq text-base mt-1 mb-3 ${
+                sentSummary.confirmed ? 'text-emerald-400' : 'text-amber-300'
+              }`}
+            >
+              {sentSummary.confirmed ? 'فائل دکان تک پہنچ گئی ہے' : 'فائل بھیج دی گئی ہے، دکان کی تصدیق کا انتظار'}
+            </p>
             <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 text-left text-xs space-y-1.5 mb-5">
               <div className="flex justify-between gap-3">
                 <span className="text-slate-400">File</span>
@@ -168,9 +230,17 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
                 <span className="text-slate-400">Size</span>
                 <span className="text-slate-100 font-semibold">{formatBytes(sentSummary.size)}</span>
               </div>
+              {copies > 1 && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-slate-400">Copies</span>
+                  <span className="text-slate-100 font-semibold">{copies}</span>
+                </div>
+              )}
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed mb-5">
-              The shop will call your number when the work is ready. You can close this page now.
+              {sentSummary.confirmed
+                ? 'The shop has the file now and will call your number when the work is ready. You can close this page.'
+                : 'The file left your phone but the shop has not confirmed yet. Please show this screen at the counter — or tap “Send another file” to retry.'}
             </p>
             <button
               onClick={reset}
@@ -192,8 +262,13 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
           <Store className="w-5 h-5 text-white" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="font-extrabold text-white text-sm leading-tight">IK COMPUTERS</div>
-          <div className="text-[11px] text-emerald-100 leading-tight">Scan &amp; Order · فائل بھیجیں</div>
+          <div className="font-extrabold text-white text-sm leading-tight">
+            {(settings.name || 'IK COMPUTERS').toUpperCase()}
+          </div>
+          <div className="text-[11px] text-emerald-100 leading-tight">
+            Scan &amp; Order · فائل بھیجیں
+            {settings.phone ? ` · ${settings.phone}` : ''}
+          </div>
         </div>
         {onExitMobileMode && (
           <button
@@ -213,7 +288,9 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
         }`}
       >
         {connected ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-        {connected ? `Connected to shop PC · ${transport}` : 'Connecting to the shop computer…'}
+        {connected
+          ? `Live · ${transport}${latency ? ` · ${latency} ms` : ''}`
+          : `Connecting to the shop computer… ${waitSeconds}s`}
         <span className="ml-auto font-mono text-[10px] opacity-70">#{room}</span>
       </div>
 
@@ -267,10 +344,10 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
               <span className="text-xs font-bold text-white">Choose file from phone</span>
               <span className="text-[10.5px] text-slate-400">
                 {activeService.accepts === 'pdf'
-                  ? 'PDF up to 25 MB'
+                  ? `PDF up to ${formatBytes(MAX_ORDER_BYTES)}`
                   : activeService.accepts === 'image'
-                  ? 'Photo / scan up to 25 MB'
-                  : 'PDF or photo up to 25 MB'}
+                  ? `Photo / scan up to ${formatBytes(MAX_ORDER_BYTES)}`
+                  : `PDF or photo up to ${formatBytes(MAX_ORDER_BYTES)}`}
               </span>
             </button>
           ) : (
@@ -299,6 +376,34 @@ export const MobileOrderView: React.FC<MobileOrderViewProps> = ({ initialRoom, o
             </div>
           )}
         </div>
+
+        {(service === 'passport' || service === 'cnic' || service === 'print') && (
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1.5 block">
+              How many copies? <span className="urdu-naskh text-slate-500">کتنی کاپیاں</span>
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {[1, 2, 4, 6, 8, 12, 16].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setCopies(n)}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold border ${
+                    copies === n
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-900 border-slate-800 text-slate-300'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            {service === 'passport' && (
+              <p className="text-[10px] text-slate-500 mt-1">
+                The shop will print this many passport-size photos and tell you the price at the counter.
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Customer details */}
         <div className="space-y-2">

@@ -14,6 +14,8 @@ import {
   X,
   CheckCircle2,
   QrCode,
+  ClipboardList,
+  Radio,
 } from 'lucide-react';
 import { LiveComposing } from './components/LiveComposing';
 import { UrduComposer } from './components/UrduComposer';
@@ -27,10 +29,14 @@ import { ShopUtilitiesHub } from './components/ShopUtilitiesHub';
 import { MobileKeyboardView } from './components/MobileKeyboardView';
 import { MobileOrderView } from './components/MobileOrderView';
 import { ScanOrderStation } from './components/ScanOrderStation';
+import { JobTicketRegister } from './components/JobTicketRegister';
+import { MobileConnectHub } from './components/MobileConnectHub';
 import { GroqSettingsModal } from './components/GroqSettingsModal';
 import { hasGroqKey } from './lib/groqClient';
 
 type ModuleKey =
+  | 'connect_phone'
+  | 'job_register'
   | 'scan_order'
   | 'live_composing'
   | 'urdu_composer'
@@ -59,6 +65,13 @@ export const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [groqModalOpen, setGroqModalOpen] = useState<boolean>(false);
   const [groqConfigured, setGroqConfigured] = useState<boolean>(() => hasGroqKey());
+  const [ticketDraft, setTicketDraft] = useState<{
+    customer?: string;
+    phone?: string;
+    service?: string;
+    source?: 'phone_qr' | 'passport' | 'counter';
+    fileName?: string;
+  } | null>(null);
 
   // Cross-module handoff states
   const [passportIncomingPhoto, setPassportIncomingPhoto] = useState<string | null>(null);
@@ -115,6 +128,20 @@ export const App: React.FC = () => {
     badge?: string;
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
+    {
+      key: 'connect_phone',
+      labelEn: 'Connect a Phone',
+      labelUr: 'موبائل کنیکٹ کریں',
+      badge: 'Live',
+      icon: Radio,
+    },
+    {
+      key: 'job_register',
+      labelEn: 'Job Tickets & Daily Cash',
+      labelUr: 'کام کی پرچی اور روزانہ حساب',
+      badge: 'New',
+      icon: ClipboardList,
+    },
     {
       key: 'scan_order',
       labelEn: 'Scan & Order (QR)',
@@ -316,8 +343,38 @@ export const App: React.FC = () => {
             />
           )}
 
+          {activeModule === 'connect_phone' && <MobileConnectHub />}
+
+          {activeModule === 'job_register' && (
+            <JobTicketRegister incoming={ticketDraft} onConsumeIncoming={() => setTicketDraft(null)} />
+          )}
+
           {activeModule === 'scan_order' && (
             <ScanOrderStation
+              onCreateTicket={(info) => {
+                setTicketDraft({
+                  customer: info.customer,
+                  phone: info.phone,
+                  service: /passport/i.test(info.service)
+                    ? 'Passport Photos'
+                    : /cnic/i.test(info.service)
+                    ? 'CNIC Front & Back'
+                    : /pdf/i.test(info.service)
+                    ? 'PDF Edit / Form Fill'
+                    : /compos/i.test(info.service)
+                    ? 'Urdu Composing'
+                    : /scan/i.test(info.service)
+                    ? 'Scan to PDF'
+                    : 'Print / Photostat',
+                  source: 'phone_qr',
+                  fileName: info.fileName,
+                });
+                setActiveModule('job_register');
+              }}
+              onSendToPassport={(dataUrl) => {
+                setPassportIncomingPhoto(dataUrl);
+                setActiveModule('id_passport');
+              }}
               onOpenFile={(file) => {
                 const isPdf = /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
                 if (isPdf) {

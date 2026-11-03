@@ -86,7 +86,26 @@
     transform: none !important;
   }
 
+  /* Every generated photo-sheet page gets its own physical sheet. */
+  .ik-print-page {
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .ik-print-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
   .no-print {
     display: none !important;
   }
+}
+
+/* Touch-friendly sliders for the phone-side tools */
+input[type='range'] {
+  height: 22px;
 }

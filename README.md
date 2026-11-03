@@ -16,6 +16,10 @@ A complete, unified web studio built specifically for **IK Computers** (Physical
 - Files live only in the browser tab: save anything you want to keep before refreshing.
 
 ### 1. 📝 Urdu & English Composing Studio (`آئی کے اردو کمپوزنگ اسٹوڈیو`)
+- **🔗 Connect a Phone hub (new)**: QR pairing with an address picker (this site / shop Wi-Fi IP / custom), printable sticker, live device count, transport name, measured latency and a connection checklist. Real message queueing, STUN/TURN ICE, ping/pong and auto-reconnect make the phone link dependable — see `MOBILE-AND-PHOTO-UPGRADE.md`.
+- **🧾 Job Tickets & Daily Cash (new)**: one ticket per counter job (customer, service, price, paid, status), printable 80 mm slip, A4 day register, WhatsApp “work is ready” message, CSV export and a live day summary (billing / collected / outstanding).
+- **⚡ Instant Background Remover (new engine)**: fully offline wall-colour matting in ~80–140 ms with soft feathered edges (no more halo), touch-up brush with undo, and AI HD as an optional second engine.
+- **🖼️ Custom Passport Photo Sheets**: choose the paper, the exact photo size in mm and *exactly how many photos* — multi-page output, several customers per sheet, face-aware framing and a single-photo PNG at portal pixels.
 - **📱 Live Mobile Urdu Keyboard Pairing (WebSocket + QR Code)**:
   - Click **"Use Mobile Keyboard"** in the Urdu Composer → scan the QR code on your smartphone!
   - Type or use **Voice-to-Urdu Mic** on your phone's native Urdu keyboard (Gboard / iOS / Samsung Urdu) — every word appears **live at the PC cursor** in real time!

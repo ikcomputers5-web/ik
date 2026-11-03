@@ -26,6 +26,15 @@ import {
 
 interface ScanOrderStationProps {
   onOpenFile: (file: File) => void;
+  /** Send an incoming customer photo straight to the Passport Photo Sheet studio. */
+  onSendToPassport?: (dataUrl: string) => void;
+  /** Turn a received order into a job ticket in the daily register. */
+  onCreateTicket?: (info: {
+    customer: string;
+    phone: string;
+    service: string;
+    fileName: string;
+  }) => void;
 }
 
 interface LanIp {
@@ -36,7 +45,11 @@ interface LanIp {
 const randomRoom = () =>
   String(Math.floor(1000 + Math.random() * 9000));
 
-export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }) => {
+export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({
+  onOpenFile,
+  onSendToPassport,
+  onCreateTicket,
+}) => {
   const [room, setRoom] = useState<string>(
     () => localStorage.getItem('ik_order_room') || randomRoom()
   );
@@ -45,6 +58,9 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
   const [lanIps, setLanIps] = useState<LanIp[]>([]);
   const [connected, setConnected] = useState(false);
   const [transport, setTransport] = useState('Standby');
+  const [latency, setLatency] = useState<number | null>(null);
+  const [phonesSeen, setPhonesSeen] = useState(0);
+  const [notifySound, setNotifySound] = useState<boolean>(() => localStorage.getItem('ik_order_sound') !== 'off');
   const [orders, setOrders] = useState<IncomingOrder[]>([]);
   const [message, setMessage] = useState<string>('');
 
@@ -101,6 +117,7 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
       onComplete: (order) => {
         setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...order } : o)));
         setMessage(`✅ ${order.fileName} received from ${order.name}.`);
+        chime();
         try {
           syncRef.current?.send({ type: 'order_done', orderId: order.id });
         } catch {
@@ -118,12 +135,17 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
       // Same namespaced room the customer page uses (never clashes with the keyboard room).
       room: `ORD${room}`,
       role: 'desktop',
-      onStatusChange: ({ connected: ok, transport: t }) => {
+      onStatusChange: ({ connected: ok, transport: t, latency: l }) => {
         setConnected(ok);
         setTransport(t);
+        setLatency(l);
       },
-      onMessage: (msg) => receiver.handle(msg),
+      onMessage: (msg) => {
+        if (msg.type === 'client_info') setPhonesSeen((n) => n + 1);
+        receiver.handle(msg);
+      },
     });
+    receiver.attach(sync);
     syncRef.current = sync;
 
     return () => {
@@ -181,8 +203,13 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
         <h2>Scan &amp; Order — فائل بھیجیں</h2>
         <img src="${qr}" alt="QR" />
         <p><strong>Scan this code and send your file</strong><br/>Print · Photostat · Composing · Passport Photos</p>
-        <p class="urdu">اپنی فائل اسکوین کریں — فوٹو کاپی، پرنٹ، کمپوزنگ، پاسپورٹ فوٹو</p>
+        <p class="urdu">اپنی فائل اسکین کریں — فوٹو کاپی، پرنٹ، کمپوزنگ، پاسپورٹ فوٹو</p>
         <div class="code">Station #${room}</div>
+        <p style="font-size:10px;color:#64748b;margin-top:6px">${
+          linkMode === 'lan'
+            ? 'Coffee-shop Wi-Fi? No — just the shop Wi-Fi. / صرف دکان کا وائی فائی'
+            : 'Needs internet or shop Wi-Fi · انٹرنیٹ یا دکان کا وائی فائی'
+        }</p>
       </div>
       </body></html>`);
     win.document.close();
@@ -193,6 +220,34 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
   };
 
   const readyCount = orders.filter((o) => o.status === 'ready').length;
+
+  // Chime when a file lands, so the shopkeeper need not watch the screen.
+  const chime = () => {
+    if (!notifySound) return;
+    try {
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.28);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+      setTimeout(() => ctx.close(), 500);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const orderPhotoDataUrl = (order: IncomingOrder): string | null => {
+    if (!order.url || !(order.mime || '').startsWith('image/')) return null;
+    return order.url;
+  };
 
   return (
     <div className="flex flex-col h-full bg-slate-950 overflow-y-auto">
@@ -219,10 +274,26 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
                 ? 'bg-emerald-950/70 border border-emerald-700 text-emerald-300'
                 : 'bg-amber-950/60 border border-amber-700 text-amber-300'
             }`}
+            title="Live link status between this counter PC and customer phones"
           >
             {connected ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-            {connected ? transport : 'Waiting for phone'}
+            {connected ? `${transport}${latency ? ` · ${latency} ms` : ''}` : 'Waiting for phone'}
           </div>
+          <button
+            onClick={() => {
+              const next = !notifySound;
+              setNotifySound(next);
+              localStorage.setItem('ik_order_sound', next ? 'on' : 'off');
+            }}
+            className={`px-2 py-1.5 rounded-lg text-[11px] font-bold border ${
+              notifySound
+                ? 'bg-slate-800 border-slate-700 text-slate-200'
+                : 'bg-slate-950 border-slate-800 text-slate-500'
+            }`}
+            title="Play a chime when a customer file arrives"
+          >
+            {notifySound ? '🔔 Sound on' : '🔕 Muted'}
+          </button>
           {readyCount > 0 && (
             <span className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-bold">
               {readyCount} new
@@ -437,6 +508,32 @@ export const ScanOrderStation: React.FC<ScanOrderStationProps> = ({ onOpenFile }
                           <ExternalLink className="w-3 h-3" />
                           {isImage ? 'Open in Image→PDF' : 'Open in PDF Editor'}
                         </button>
+                        {onCreateTicket && (
+                          <button
+                            onClick={() =>
+                              onCreateTicket({
+                                customer: order.name,
+                                phone: order.phone,
+                                service: order.serviceLabel,
+                                fileName: order.fileName,
+                              })
+                            }
+                            className="px-2 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[10.5px] font-bold flex items-center gap-1"
+                          >
+                            + Ticket
+                          </button>
+                        )}
+                        {onSendToPassport && orderPhotoDataUrl(order) && (
+                          <button
+                            onClick={() => {
+                              const dataUrl = orderPhotoDataUrl(order);
+                              if (dataUrl) onSendToPassport(dataUrl);
+                            }}
+                            className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10.5px] font-bold flex items-center gap-1"
+                          >
+                            <QrCode className="w-3 h-3" /> Passport Sheet
+                          </button>
+                        )}
                         {order.url && (
                           <>
                             <a
