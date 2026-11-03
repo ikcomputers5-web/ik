@@ -88,6 +88,8 @@ export const UrduComposer: React.FC<UrduComposerProps> = ({
   // Mobile Remote Keyboard WebSocket state
   const [roomCode] = useState<string>(getOrCreateRoomCode);
   const [mobileCount, setMobileCount] = useState<number>(0);
+  const [mobileTransport, setMobileTransport] = useState<string>('Standby');
+  const [mobileLatency, setMobileLatency] = useState<number | null>(null);
   const [mobileLiveText, setMobileLiveText] = useState<string>('');
   const [showMobileModal, setShowMobileModal] = useState<boolean>(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -271,8 +273,10 @@ export const UrduComposer: React.FC<UrduComposerProps> = ({
     const sync = new HybridMobileSync({
       room: roomCode,
       role: 'desktop',
-      onStatusChange: ({ peerCount }) => {
+      onStatusChange: ({ peerCount, transport, latency }) => {
         setMobileCount(peerCount);
+        setMobileTransport(transport);
+        setMobileLatency(latency);
       },
       onMessage: (msg) => {
         if (msg.type === 'live_composing') {
@@ -1147,6 +1151,12 @@ export const UrduComposer: React.FC<UrduComposerProps> = ({
               </span>
             </div>
 
+            <div className="mb-3 rounded-xl bg-slate-950/70 border border-slate-800 p-2.5 text-[10.5px] text-slate-400 leading-relaxed">
+              <strong className="text-slate-200">Not pairing?</strong> The phone and this PC must be on the
+              same Wi-Fi, or both online. If the QR opens but stays “Connecting”, tap the URL box above and
+              copy the link into WhatsApp on the phone instead — the link keeps working over the internet.
+            </div>
+
             {lanIps.length > 1 && (
               <div className="mb-3">
                 <label className="block text-[11px] text-slate-400 mb-1">
@@ -1202,7 +1212,11 @@ export const UrduComposer: React.FC<UrduComposerProps> = ({
               <span className="text-xs text-slate-400">
                 Status:{' '}
                 <strong className={mobileCount > 0 ? 'text-emerald-400' : 'text-amber-400'}>
-                  {mobileCount > 0 ? `${mobileCount} Mobile Active` : 'Waiting for phone...'}
+                  {mobileCount > 0
+                    ? `${mobileCount} mobile · ${mobileTransport}${
+                        mobileLatency ? ` · ${mobileLatency} ms` : ''
+                      }`
+                    : 'Waiting for phone…'}
                 </strong>
               </span>
               <a

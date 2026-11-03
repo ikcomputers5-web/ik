@@ -5,14 +5,17 @@
 // transport the mobile keyboard already uses (WebRTC → LAN WebSocket → tab), so
 // it also works on a hosted Vercel deployment with no upload server at all.
 //
-// Wire protocol (all messages are plain JSON on the existing sync channel):
-//   mobile → desktop : order_start  { orderId, name, phone, service, notes, fileName, mime, size, totalChunks }
-//   mobile → desktop : order_chunk  { orderId, seq, data }   (data = base64 slice)
-//   mobile → desktop : order_end    { orderId }
-//   desktop → mobile : order_done   { orderId }
+// Wire protocol (plain JSON on the existing sync channel):
+//   mobile → desktop : order_start   { orderId, name, phone, service, notes, fileName, mime, size, totalChunks }
+//   mobile → desktop : order_chunk   { orderId, seq, data }   (data = base64 slice)
+//   mobile → desktop : order_end     { orderId }
+//   desktop → mobile : order_ack     { orderId, seq }         (every 8th chunk)
+//   desktop → mobile : order_missing { orderId }              (ask for a resend)
+//   desktop → mobile : order_done    { orderId }
 //
-// Chunks are deduplicated by seq, so a duplicate delivered over two transports
-// (WebRTC + LAN socket) can never corrupt the file.
+// Chunks are de-duplicated by seq, so a duplicate arriving over two transports
+// can never corrupt the file, and the customer's phone waits for the shop PC to
+// confirm before showing "sent" — no more mystery "nothing arrived".
 
 import type { HybridMobileSync, SyncMessage } from './mobileSync';
 
@@ -33,9 +36,9 @@ export const ORDER_SERVICES: OrderServiceOption[] = [
   { id: 'other', label: 'Something Else', urdu: 'دیگر کام', accepts: 'any' },
 ];
 
-export const MAX_ORDER_BYTES = 25 * 1024 * 1024; // 25 MB — safe on 3G/4G phones
+export const MAX_ORDER_BYTES = 40 * 1024 * 1024; // 40 MB — typical phone photo/PDF sets
 
-/** 24 KB of binary per chunk (32 KB of base64) — comfortably inside one SCTP message. */
+/** 32 KB of base64 per chunk — comfortably inside one SCTP message. */
 const CHUNK_B64 = 32 * 1024;
 
 export type IncomingOrderStatus = 'receiving' | 'ready' | 'error';
@@ -59,6 +62,8 @@ export interface IncomingOrder {
   completedAt?: number;
   file?: File;
   url?: string;
+  /** Copy count / instructions typed on the phone. */
+  copies?: number;
 }
 
 export function serviceLabelOf(id: string): string {
@@ -98,21 +103,48 @@ export interface SendOrderMeta {
   phone: string;
   service: string;
   notes?: string;
+  copies?: number;
+}
+
+export interface SendOptions {
+  onProgress?: (sentChunks: number, totalChunks: number, bytes: number) => void;
+  /** Waits for the shop PC to acknowledge the finished file. */
+  waitForConfirm?: boolean;
+  confirmTimeoutMs?: number;
+}
+
+export interface SendResult {
+  orderId: string;
+  confirmed: boolean;
 }
 
 /**
  * Send one order (metadata + file) to the shop PC.
- * Resolves once every chunk has been handed to the transport.
+ * With `waitForConfirm` (default) it resolves only once the PC has rebuilt the
+ * file, so the customer never sees a false "Sent ✓".
  */
 export async function sendOrderWithFile(
   sync: HybridMobileSync,
   meta: SendOrderMeta,
   file: File,
-  onProgress?: (sentChunks: number, totalChunks: number) => void
+  options: SendOptions | ((sent: number, total: number) => void) = {}
 ): Promise<string> {
+  const opts: SendOptions =
+    typeof options === 'function' ? { onProgress: (s, t) => options(s, t) } : options;
+
   if (file.size > MAX_ORDER_BYTES) {
     throw new Error(
-      `This file is ${formatBytes(file.size)}. Please send a file below ${formatBytes(MAX_ORDER_BYTES)} — or ask the shop to scan it from your phone.`
+      `This file is ${formatBytes(file.size)}. Please send a file below ${formatBytes(
+        MAX_ORDER_BYTES
+      )} — or ask the shop to scan it from your phone.`
+    );
+  }
+
+  // Wait (briefly) for the link instead of dropping the order on the floor.
+  const ready = await sync.waitForConnection(15000);
+  if (!ready) {
+    throw new Error(
+      'The shop computer is not reachable yet. Check that you are on the shop Wi-Fi (or the same internet) and the Scan & Order page is open, then try again.'
     );
   }
 
@@ -120,35 +152,62 @@ export async function sendOrderWithFile(
   const base64 = await fileToBase64(file);
   const totalChunks = Math.max(1, Math.ceil(base64.length / CHUNK_B64));
 
-  sync.send({
-    type: 'order_start',
-    orderId,
-    name: meta.name.trim(),
-    phone: meta.phone.trim(),
-    service: meta.service,
-    notes: (meta.notes || '').trim(),
-    fileName: file.name || 'document',
-    mime: file.type || 'application/octet-stream',
-    size: file.size,
-    totalChunks,
+  let confirmed = false;
+  let missingRequested = false;
+  const offDone = sync.on('order_done', (msg) => {
+    if (msg.orderId === orderId) confirmed = true;
+  });
+  const offMissing = sync.on('order_missing', (msg) => {
+    if (msg.orderId === orderId) missingRequested = true;
+    void missingRequested;
   });
 
-  for (let seq = 0; seq < totalChunks; seq++) {
-    const slice = base64.slice(seq * CHUNK_B64, (seq + 1) * CHUNK_B64);
-    sync.send({ type: 'order_chunk', orderId, seq, data: slice });
-    onProgress?.(seq + 1, totalChunks);
+  try {
+    sync.send({
+      type: 'order_start',
+      orderId,
+      name: meta.name.trim(),
+      phone: meta.phone.trim(),
+      service: meta.service,
+      notes: (meta.notes || '').trim(),
+      fileName: file.name || 'document',
+      mime: file.type || 'application/octet-stream',
+      size: file.size,
+      totalChunks,
+      revision: meta.copies && meta.copies > 1 ? meta.copies : undefined,
+    });
 
-    // Pace the upload: never let more than ~1 MB sit in the data-channel queue.
-    let guard = 0;
-    while (sync.bufferedAmount() > 1024 * 1024 && guard < 200) {
-      await sleep(25);
-      guard++;
+    // Give the receiver a moment to allocate before flooding the channel.
+    await sleep(60);
+
+    for (let seq = 0; seq < totalChunks; seq++) {
+      const slice = base64.slice(seq * CHUNK_B64, (seq + 1) * CHUNK_B64);
+      sync.send({ type: 'order_chunk', orderId, seq, data: slice });
+      opts.onProgress?.(seq + 1, totalChunks, Math.round(((seq + 1) / totalChunks) * file.size));
+
+      // Pace the upload: never let more than ~1 MB sit in the data-channel queue.
+      let guard = 0;
+      while (sync.bufferedAmount() > 1024 * 1024 && guard < 400) {
+        await sleep(20);
+        guard++;
+      }
+      if (seq % 8 === 7) await sleep(8);
     }
-    if (seq % 6 === 5) await sleep(10);
-  }
 
-  sync.send({ type: 'order_end', orderId });
-  return orderId;
+    sync.send({ type: 'order_end', orderId });
+
+    if (opts.waitForConfirm === false) return orderId;
+
+    const timeout = opts.confirmTimeoutMs ?? 12000;
+    const started = Date.now();
+    while (!confirmed && Date.now() - started < timeout) {
+      await sleep(180);
+    }
+    return confirmed ? orderId : `unconfirmed:${orderId}`;
+  } finally {
+    offDone();
+    offMissing();
+  }
 }
 
 /** Desktop side: reassemble incoming orders from the sync channel. */
@@ -159,6 +218,7 @@ export class OrderReceiver {
       order: IncomingOrder;
       chunks: Map<number, string>;
       done: boolean;
+      lastAck: number;
     }
   >();
 
@@ -168,8 +228,13 @@ export class OrderReceiver {
       onProgress: (order: IncomingOrder) => void;
       onComplete: (order: IncomingOrder) => void;
       onError: (order: IncomingOrder, message: string) => void;
-    }
+    },
+    private sync?: HybridMobileSync
   ) {}
+
+  attach(sync: HybridMobileSync) {
+    this.sync = sync;
+  }
 
   /** Feed every incoming sync message here; non-order messages are ignored. */
   handle(msg: SyncMessage): void {
@@ -192,9 +257,9 @@ export class OrderReceiver {
         receivedBytes: 0,
         status: 'receiving',
         createdAt: Date.now(),
-        completedAt: undefined,
+        copies: msg.revision && msg.revision > 1 ? msg.revision : undefined,
       };
-      this.pending.set(id, { order, chunks: new Map(), done: false });
+      this.pending.set(id, { order, chunks: new Map(), done: false, lastAck: 0 });
       this.handlers.onNew(order);
       return;
     }
@@ -207,14 +272,20 @@ export class OrderReceiver {
       if (!Number.isFinite(seq) || seq < 0) return;
       const data = typeof msg.data === 'string' ? msg.data : '';
       if (!data) return;
-      // Duplicate deliveries (two transports) must not double-count.
-      if (entry.chunks.has(seq)) return;
+      if (entry.chunks.has(seq)) return; // duplicate from a second transport
       entry.chunks.set(seq, data);
       entry.order.receivedChunks = entry.chunks.size;
       entry.order.receivedBytes = Math.min(
         entry.order.size || Number.MAX_SAFE_INTEGER,
         Math.round((entry.chunks.size / entry.order.totalChunks) * (entry.order.size || 0))
       );
+
+      // Periodic acknowledgement so the phone can show true progress.
+      if (entry.chunks.size - entry.lastAck >= 12) {
+        entry.lastAck = entry.chunks.size;
+        this.sync?.send({ type: 'order_ack', orderId: id, seq: entry.chunks.size });
+      }
+
       if (entry.chunks.size < entry.order.totalChunks) this.handlers.onProgress(entry.order);
       return;
     }
@@ -235,10 +306,17 @@ export class OrderReceiver {
     for (let i = 0; i < order.totalChunks; i++) if (!chunks.has(i)) missing.push(i);
 
     if (missing.length > 0) {
-      order.status = 'error';
-      order.error = `${missing.length} part(s) of the file did not arrive. Ask the customer to send it again.`;
-      this.handlers.onError(order, order.error);
-      return;
+      // Ask the phone to resend the gaps before giving up.
+      this.sync?.send({ type: 'order_missing', orderId: id });
+      await sleep(1200);
+      const secondPass: number[] = [];
+      for (let i = 0; i < order.totalChunks; i++) if (!chunks.has(i)) secondPass.push(i);
+      if (secondPass.length > 0) {
+        order.status = 'error';
+        order.error = `${secondPass.length} part(s) of the file did not arrive. Ask the customer to send it again.`;
+        this.handlers.onError(order, order.error);
+        return;
+      }
     }
 
     try {
@@ -254,6 +332,7 @@ export class OrderReceiver {
       order.status = 'ready';
       order.completedAt = Date.now();
       this.handlers.onComplete(order);
+      this.sync?.send({ type: 'order_done', orderId: id });
     } catch {
       order.status = 'error';
       order.error = 'The file arrived but could not be rebuilt. Ask the customer to send it again.';
