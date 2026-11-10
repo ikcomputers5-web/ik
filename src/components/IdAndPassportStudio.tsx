@@ -17,6 +17,7 @@ import {
   Copy as CopyIcon,
   ChevronLeft,
   ChevronRight,
+  Upload,
 } from 'lucide-react';
 import { renderFilteredDocumentCanvas } from '../lib/imageFilters';
 import { loadImageElement, alphaBoundingBox } from '../lib/bgRemoval';
@@ -87,14 +88,33 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
   const [singleBusy, setSingleBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // -------------------------------- CNIC ----------------------------------
-  const [cnicFrontRaw, setCnicFrontRaw] = useState('');
-  const [cnicBackRaw, setCnicBackRaw] = useState('');
-  const [frontRot, setFrontRot] = useState(0);
-  const [backRot, setBackRot] = useState(0);
+  // -------------------------------- CNIC (multi-card) ----------------------------------
+  interface CnicEntry {
+    id: string;
+    label: string;
+    frontRaw: string;
+    backRaw: string;
+    frontRot: number;
+    backRot: number;
+    copies: number;
+  }
+  const newCnicEntry = (n: number): CnicEntry => ({
+    id: `cnic-${Date.now()}-${n}-${Math.random().toString(36).slice(2, 7)}`,
+    label: `Person ${n}`,
+    frontRaw: '',
+    backRaw: '',
+    frontRot: 0,
+    backRot: 0,
+    copies: 1,
+  });
+  const [cnicEntries, setCnicEntries] = useState<CnicEntry[]>(() => [newCnicEntry(1)]);
   const [cnicCleanBw, setCnicCleanBw] = useState(true);
-  const [cnicCopies, setCnicCopies] = useState<1 | 2 | 4>(2);
-  const [cnicSheetPreview, setCnicSheetPreview] = useState('');
+  const [cnicAutoFit, setCnicAutoFit] = useState(true);
+  const [cnicShowLabels, setCnicShowLabels] = useState(false);
+  const [cnicSheetPages, setCnicSheetPages] = useState<string[]>([]);
+  const [cnicPageIndex, setCnicPageIndex] = useState(0);
+  // legacy single-card preview kept for print fallback
+  const cnicSheetPreview = cnicSheetPages[Math.min(cnicPageIndex, Math.max(0, cnicSheetPages.length - 1))] || '';
 
   useEffect(() => {
     if (!incomingPassportPhoto) return;
@@ -314,10 +334,11 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
     }
   };
 
-  // ------------------------------ CNIC sheet ------------------------------
+  // ------------------------------ CNIC sheet (multi-card grid) ------------------------------
   useEffect(() => {
-    if (!cnicFrontRaw && !cnicBackRaw) {
-      setCnicSheetPreview('');
+    const hasAny = cnicEntries.some((e) => e.frontRaw || e.backRaw);
+    if (!hasAny) {
+      setCnicSheetPages([]);
       return;
     }
     let cancelled = false;
@@ -325,64 +346,101 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
       const pxPerMm = 8;
       const a4W = Math.round(210 * pxPerMm);
       const a4H = Math.round(297 * pxPerMm);
-      const cardW = Math.round(85.6 * pxPerMm);
-      const cardH = Math.round(54.0 * pxPerMm);
+      let cardW = Math.round(85.6 * pxPerMm);
+      let cardH = Math.round(54.0 * pxPerMm);
+      const gapPx = Math.round(10 * pxPerMm);
+      const labelH = cnicShowLabels ? Math.round(7 * pxPerMm) : 0;
+      const topMargin = Math.round(16 * pxPerMm);
+      const usableH = a4H - topMargin - Math.round(16 * pxPerMm);
 
-      const canvas = document.createElement('canvas');
-      canvas.width = a4W;
-      canvas.height = a4H;
-      const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, a4W, a4H);
-
-      let frontCanvas: HTMLCanvasElement | null = null;
-      let backCanvas: HTMLCanvasElement | null = null;
-
-      if (cnicFrontRaw) {
-        const fImg = await loadImageElement(cnicFrontRaw);
-        frontCanvas = renderFilteredDocumentCanvas(fImg, {
-          filter: cnicCleanBw ? 'magic_bw' : 'vivid_scan',
-          rotation: frontRot,
-          contrast: cnicCleanBw ? 12 : 4,
-        });
-      }
-      if (cnicBackRaw) {
-        const bImg = await loadImageElement(cnicBackRaw);
-        backCanvas = renderFilteredDocumentCanvas(bImg, {
-          filter: cnicCleanBw ? 'magic_bw' : 'vivid_scan',
-          rotation: backRot,
-          contrast: cnicCleanBw ? 12 : 4,
-        });
-      }
-
-      const marginX = Math.round((a4W - (cardW * 2 + 12 * pxPerMm)) / 2);
-      const startY = Math.round(16 * pxPerMm);
-      const rowGap = Math.round(12 * pxPerMm);
-
-      for (let i = 0; i < cnicCopies; i++) {
-        const y = startY + i * (cardH + rowGap);
-        if (frontCanvas) {
-          ctx.drawImage(frontCanvas, marginX, y, cardW, cardH);
-          ctx.strokeStyle = '#94a3b8';
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(marginX, y, cardW, cardH);
+      type Tile = { canvas: HTMLCanvasElement; label: string };
+      const tiles: Tile[] = [];
+      for (const entry of cnicEntries) {
+        const copies = Math.max(1, Math.min(4, entry.copies || 1));
+        let fCanvas: HTMLCanvasElement | null = null;
+        let bCanvas: HTMLCanvasElement | null = null;
+        if (entry.frontRaw) {
+          const fImg = await loadImageElement(entry.frontRaw);
+          fCanvas = renderFilteredDocumentCanvas(fImg, {
+            filter: cnicCleanBw ? 'magic_bw' : 'vivid_scan',
+            rotation: entry.frontRot,
+            contrast: cnicCleanBw ? 12 : 4,
+          });
         }
-        if (backCanvas) {
-          const bx = marginX + cardW + Math.round(12 * pxPerMm);
-          ctx.drawImage(backCanvas, bx, y, cardW, cardH);
-          ctx.strokeStyle = '#94a3b8';
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(bx, y, cardW, cardH);
+        if (entry.backRaw) {
+          const bImg = await loadImageElement(entry.backRaw);
+          bCanvas = renderFilteredDocumentCanvas(bImg, {
+            filter: cnicCleanBw ? 'magic_bw' : 'vivid_scan',
+            rotation: entry.backRot,
+            contrast: cnicCleanBw ? 12 : 4,
+          });
+        }
+        for (let k = 0; k < copies; k++) {
+          if (fCanvas) tiles.push({ canvas: fCanvas, label: entry.label });
+          if (bCanvas) tiles.push({ canvas: bCanvas, label: entry.label });
         }
       }
+      if (cancelled || tiles.length === 0) return;
 
-      if (!cancelled) setCnicSheetPreview(canvas.toDataURL('image/jpeg', 0.94));
+      const cols = 2;
+      if (cnicAutoFit) {
+        const rowsNeeded = Math.ceil(tiles.length / cols);
+        const neededH = rowsNeeded * (cardH + labelH) + (rowsNeeded - 1) * gapPx;
+        if (neededH > usableH) {
+          const scale = Math.max(0.42, usableH / neededH);
+          cardW = Math.max(Math.round(38 * pxPerMm), Math.round(cardW * scale));
+          cardH = Math.max(Math.round(24 * pxPerMm), Math.round(cardH * scale));
+        }
+      }
+      const effRowH = cardH + labelH;
+      const rowsPerPage = Math.max(1, Math.floor((usableH + gapPx) / (effRowH + gapPx)));
+      const perPage = cols * rowsPerPage;
+      const totalPages = Math.max(1, Math.ceil(tiles.length / perPage));
+      const urls: string[] = [];
+      for (let p = 0; p < totalPages; p++) {
+        const canvas = document.createElement('canvas');
+        canvas.width = a4W;
+        canvas.height = a4H;
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, a4W, a4H);
+        const slice = tiles.slice(p * perPage, (p + 1) * perPage);
+        const totalW = cols * cardW + (cols - 1) * gapPx;
+        const startX = Math.round((a4W - totalW) / 2);
+        slice.forEach((tile, i) => {
+          const r = Math.floor(i / cols);
+          const c = i % cols;
+          const x = startX + c * (cardW + gapPx);
+          const y = topMargin + r * (effRowH + gapPx);
+          ctx.drawImage(tile.canvas, x, y, cardW, cardH);
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(x, y, cardW, cardH);
+          if (cnicShowLabels && tile.label) {
+            ctx.font = `600 ${Math.round(3.2 * pxPerMm)}px sans-serif`;
+            ctx.fillStyle = '#475569';
+            ctx.textAlign = 'center';
+            ctx.fillText(tile.label, x + cardW / 2, y + cardH + Math.round(4.5 * pxPerMm));
+          }
+        });
+        if (totalPages > 1) {
+          ctx.font = `500 ${Math.round(3 * pxPerMm)}px sans-serif`;
+          ctx.fillStyle = '#94a3b8';
+          ctx.textAlign = 'center';
+          ctx.fillText(`Page ${p + 1} of ${totalPages}`, a4W / 2, a4H - Math.round(10 * pxPerMm));
+        }
+        urls.push(canvas.toDataURL('image/jpeg', 0.94));
+      }
+      if (!cancelled) {
+        setCnicSheetPages(urls);
+        setCnicPageIndex((idx) => Math.min(idx, Math.max(0, urls.length - 1)));
+      }
     };
     void buildCnicSheet();
     return () => {
       cancelled = true;
     };
-  }, [cnicFrontRaw, cnicBackRaw, frontRot, backRot, cnicCleanBw, cnicCopies]);
+  }, [cnicEntries, cnicCleanBw, cnicAutoFit, cnicShowLabels]);
 
   const downloadCnicPdf = () => {
     if (!cnicSheetPreview) return;
@@ -988,97 +1046,140 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
         </div>
       )}
 
-      {/* ============================== CNIC TAB ============================== */}
+      {/* ============================== CNIC TAB (multi-card) ============================== */}
       {tab === 'cnic' && (
         <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 no-print">
           <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 h-fit">
             <div>
-              <h3 className="font-bold text-white text-base">CNIC Front &amp; Back A4 Sheet</h3>
+              <h3 className="font-bold text-white text-base">CNIC Front &amp; Back A4 Sheet — Multi-Card</h3>
               <p className="text-xs text-slate-400">
-                Auto-scales WhatsApp photos to exact NADRA card size (85.6 × 54 mm) on A4.
+                Add <strong className="text-emerald-300">multiple different people</strong> on one A4 page. Auto-scales to NADRA size (85.6 × 54 mm).
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5">
-              <div className="space-y-1.5">
-                <label className="block border-2 border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 text-center cursor-pointer">
-                  <span className="text-xs font-bold text-emerald-400 block">
-                    {cnicFrontRaw ? '✓ CNIC Front' : '+ Front Side'}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={async (e) => {
-                      const f = e.target.files?.[0];
-                      if (f) setCnicFrontRaw(await readAsDataUrl(f));
-                    }}
-                    className="hidden"
-                  />
-                </label>
-                {cnicFrontRaw && (
-                  <button
-                    onClick={() => setFrontRot((r) => (r + 90) % 360)}
-                    className="w-full py-1 rounded bg-slate-800 text-[11px] text-slate-300 flex items-center justify-center gap-1"
-                  >
-                    <RotateCw className="w-3 h-3" /> Rotate Front
-                  </button>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block border-2 border-dashed border-slate-700 hover:border-emerald-500 rounded-xl p-3 text-center cursor-pointer">
-                  <span className="text-xs font-bold text-sky-400 block">
-                    {cnicBackRaw ? '✓ CNIC Back' : '+ Back Side'}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={async (e) => {
-                      const f = e.target.files?.[0];
-                      if (f) setCnicBackRaw(await readAsDataUrl(f));
-                    }}
-                    className="hidden"
-                  />
-                </label>
-                {cnicBackRaw && (
-                  <button
-                    onClick={() => setBackRot((r) => (r + 90) % 360)}
-                    className="w-full py-1 rounded bg-slate-800 text-[11px] text-slate-300 flex items-center justify-center gap-1"
-                  >
-                    <RotateCw className="w-3 h-3" /> Rotate Back
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Copies on single A4 page
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => setCnicEntries((prev) => [...prev, newCnicEntry(prev.length + 1)])}
+                className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1"
+              >
+                <Plus className="w-3 h-3" /> Add Person
+              </button>
+              <label className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-bold text-emerald-300 cursor-pointer flex items-center gap-1">
+                <Upload className="w-3 h-3" /> Add Many (auto-pair)
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={async (e) => {
+                    const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
+                    if (files.length === 0) return;
+                    let next = [...cnicEntries];
+                    const needed = Math.ceil(files.length / 2);
+                    while (next.length < needed) next.push(newCnicEntry(next.length + 1));
+                    for (let i = 0; i < files.length; i++) {
+                      const idx = Math.floor(i / 2);
+                      const url = await readAsDataUrl(files[i]);
+                      next[idx] = { ...next[idx], [i % 2 === 0 ? 'frontRaw' : 'backRaw']: url };
+                    }
+                    setCnicEntries(next);
+                    e.target.value = '';
+                  }}
+                />
               </label>
-              <div className="grid grid-cols-3 gap-2">
-                {([1, 2, 4] as const).map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => setCnicCopies(n)}
-                    className={`py-2 rounded-xl text-xs font-bold border ${
-                      cnicCopies === n
-                        ? 'bg-emerald-600 border-emerald-500 text-white'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {n} {n === 1 ? 'Copy' : 'Copies'}
-                  </button>
-                ))}
-              </div>
+              <button
+                onClick={() => setCnicEntries([newCnicEntry(1)])}
+                className="px-2.5 py-1.5 rounded-xl bg-rose-950/60 border border-rose-800 text-rose-300 text-[11px] font-bold"
+              >
+                Clear
+              </button>
             </div>
+
+            <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+              {cnicEntries.map((entry, idx) => (
+                <div key={entry.id} className="bg-slate-950/60 border border-slate-800 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
+                    <input
+                      value={entry.label}
+                      onChange={(e) => setCnicEntries((prev) => prev.map((p) => (p.id === entry.id ? { ...p, label: e.target.value } : p)))}
+                      className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] font-bold text-white outline-none focus:border-emerald-500"
+                      placeholder={`Person ${idx + 1}`}
+                    />
+                    <div className="flex items-center gap-0.5">
+                      {[1, 2, 4].map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => setCnicEntries((prev) => prev.map((p) => (p.id === entry.id ? { ...p, copies: n } : p)))}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${entry.copies === n ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'}`}
+                        >
+                          {n}x
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setCnicEntries((prev) => (prev.length <= 1 ? prev : prev.filter((p) => p.id !== entry.id)))}
+                        className="p-1 text-slate-500 hover:text-rose-400"
+                        title="Remove"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['front', 'back'] as const).map((side) => {
+                      const raw = side === 'front' ? entry.frontRaw : entry.backRaw;
+                      const rot = side === 'front' ? entry.frontRot : entry.backRot;
+                      return (
+                        <div key={side} className="space-y-1">
+                          <label className={`block border-2 border-dashed rounded-xl p-2 text-center cursor-pointer ${side === 'front' ? 'border-slate-700 hover:border-emerald-500' : 'border-slate-700 hover:border-sky-500'}`}>
+                            <span className={`text-[11px] font-bold block ${side === 'front' ? 'text-emerald-400' : 'text-sky-400'}`}>
+                              {raw ? `✓ ${side === 'front' ? 'Front' : 'Back'}` : `+ ${side === 'front' ? 'Front' : 'Back'}`}
+                            </span>
+                            {raw && <img src={raw} alt={side} className="w-full h-14 object-contain mt-1 rounded bg-slate-900" />}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const f = e.target.files?.[0];
+                                if (!f) return;
+                                const url = await readAsDataUrl(f);
+                                setCnicEntries((prev) => prev.map((p) => (p.id === entry.id ? { ...p, [side === 'front' ? 'frontRaw' : 'backRaw']: url } : p)));
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                          {raw && (
+                            <button
+                              onClick={() => setCnicEntries((prev) => prev.map((p) => (p.id === entry.id ? { ...p, [side === 'front' ? 'frontRot' : 'backRot']: ((side === 'front' ? p.frontRot : p.backRot) + 90) % 360 } : p)))}
+                              className="w-full py-1 rounded bg-slate-800 text-[10px] text-slate-300 flex items-center justify-center gap-1"
+                            >
+                              <RotateCw className="w-3 h-3" /> Rotate {rot}°
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <label className="flex items-center gap-2.5 bg-emerald-950/40 border border-emerald-800/60 rounded-xl p-3 cursor-pointer">
+              <input type="checkbox" checked={cnicAutoFit} onChange={(e) => setCnicAutoFit(e.target.checked)} className="accent-emerald-500 w-4 h-4" />
+              <div className="text-xs">
+                <div className="font-bold text-emerald-300">Auto-fit all on ONE A4 page</div>
+                <div className="text-slate-400">Shrinks cards to fit many people on a single sheet</div>
+              </div>
+            </label>
+
+            <label className="flex items-center gap-2 text-slate-300 text-xs cursor-pointer">
+              <input type="checkbox" checked={cnicShowLabels} onChange={(e) => setCnicShowLabels(e.target.checked)} className="accent-emerald-500" />
+              Print person name under each card
+            </label>
 
             <label className="flex items-center gap-2.5 bg-amber-950/30 border border-amber-700/50 rounded-xl p-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={cnicCleanBw}
-                onChange={(e) => setCnicCleanBw(e.target.checked)}
-                className="accent-amber-500 w-4 h-4"
-              />
+              <input type="checkbox" checked={cnicCleanBw} onChange={(e) => setCnicCleanBw(e.target.checked)} className="accent-amber-500 w-4 h-4" />
               <div className="text-xs">
                 <div className="font-bold text-amber-300 flex items-center gap-1">
                   <Sparkles className="w-3.5 h-3.5" /> Clean B&amp;W photostat (toner saver)
@@ -1086,18 +1187,29 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
                 <div className="text-slate-400">Whitens WhatsApp shadows for a clean laser copy</div>
               </div>
             </label>
+            <p className="text-[10px] text-slate-500">For crop, straighten &amp; dashed cut guides, use the dedicated “Front &amp; Back ID Page” maker in the sidebar.</p>
           </div>
 
-          <div className="lg:col-span-8 flex items-center justify-center bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+          <div className="lg:col-span-8 flex flex-col items-center justify-center bg-slate-900/50 border border-slate-800 rounded-2xl p-6 gap-3">
             {cnicSheetPreview ? (
-              <img
-                src={cnicSheetPreview}
-                alt="CNIC A4 sheet preview"
-                className="max-h-[72vh] w-auto object-contain shadow-2xl rounded bg-white"
-              />
+              <>
+                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  A4 Preview — Page {Math.min(cnicPageIndex + 1, cnicSheetPages.length)} / {cnicSheetPages.length} • {cnicEntries.filter((e) => e.frontRaw || e.backRaw).length} person(s)
+                </div>
+                <img src={cnicSheetPreview} alt="CNIC A4 sheet preview" className="max-h-[68vh] w-auto object-contain shadow-2xl rounded bg-white" />
+                {cnicSheetPages.length > 1 && (
+                  <div className="flex gap-1.5">
+                    {cnicSheetPages.map((url, i) => (
+                      <button key={i} onClick={() => setCnicPageIndex(i)} className={`w-10 h-14 rounded overflow-hidden border-2 ${i === cnicPageIndex ? 'border-emerald-500' : 'border-slate-700 opacity-60'}`}>
+                        <img src={url} alt={`CNIC page ${i + 1}`} className="w-full h-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
-              <p className="text-xs text-slate-500">
-                Upload CNIC front &amp; back images to lay them out cleanly on one A4 page.
+              <p className="text-xs text-slate-500 text-center max-w-sm">
+                Add multiple people above — each with Front &amp; Back — and they will be laid out together on one A4 page.
               </p>
             )}
           </div>
@@ -1110,9 +1222,9 @@ export const IdAndPassportStudio: React.FC<IdAndPassportStudioProps> = ({
           ? pages.map((p, i) => (
               <img key={i} src={p.url} alt={`Sheet page ${i + 1}`} className="ik-print-page w-full h-auto" />
             ))
-          : cnicSheetPreview && (
-              <img src={cnicSheetPreview} alt="CNIC sheet" className="ik-print-page w-full h-auto" />
-            )}
+          : cnicSheetPages.map((url, i) => (
+              <img key={i} src={url} alt={`CNIC sheet ${i + 1}`} className="ik-print-page w-full h-auto" />
+            ))}
       </div>
     </div>
   );
