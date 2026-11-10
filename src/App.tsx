@@ -159,9 +159,9 @@ export const App: React.FC = () => {
     },
     {
       key: 'id_card_maker',
-      labelEn: 'Front & Back ID Page',
+      labelEn: 'ID Cards — Multi on 1 Page',
       labelUr: 'شناختی کارڈ فرنٹ بیک پیج',
-      badge: 'Ctrl+V',
+      badge: 'Multi',
       icon: IdCard,
     },
     {
